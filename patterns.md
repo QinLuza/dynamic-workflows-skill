@@ -13,7 +13,7 @@
 增加一条从靠后阶段回到靠前阶段的反馈回路。其余形态是
 搭建这些流水线所用的零件。
 
-API 面本身请读 SKILL.md §16。这些选择背后的理由，
+API 面本身请读 `references/tool-contract.md`（SKILL.md §16）。这些选择背后的理由，
 请读 `SKILL.md` 的其余部分。
 
 ---

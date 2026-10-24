@@ -5,7 +5,7 @@
 去查某个单一形态（那件事归 `patterns.md`）。
 
 本文件中的每个脚本都作为 `CreateWorkflow` 工具的 `script` 参数提交。它们针对编写的
-API 面是 `SKILL.md` §16（§16.2 的门面代码块与 §16.3 的规则），而不是工具描述。
+API 面是 `references/tool-contract.md`（§16.2 的门面代码块与 §16.3 的规则），而不是工具描述。
 
 ---
 

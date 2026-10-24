@@ -15,13 +15,14 @@
 
 | 文件 | 内容 |
 |---|---|
-| `SKILL.md` | 技能本体（全中文）：判断层（§1–15）+ 工具契约（§16）；含 2026-10-24 词元经济学修订 |
+| `SKILL.md` | 技能本体（全中文）：判断层（§1–15）+ §16 指针；含 2026-10-24 词元经济学修订 |
+| `references/tool-contract.md` | 工具契约（§16）：facade、编译规则、五件工具字段；写脚本前必读 |
 | `patterns.md` | 拓扑目录（流水线、评审、通道、洞等），全中文 |
 | `examples.md` | 完整示例脚本，全中文 |
 
 ## 安装
 
-三件套放进同一目录：`~/.agents/skills/dynamic-workflows/`。`SKILL.md` 里的 `${ZCODE_SKILL_DIR}` 即该目录。
+保持目录结构放进 `~/.agents/skills/dynamic-workflows/`：`SKILL.md`、`patterns.md`、`examples.md`、`references/tool-contract.md`。`SKILL.md` 里的 `${ZCODE_SKILL_DIR}` 即该目录。
 
 ## 许可
 

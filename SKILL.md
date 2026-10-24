@@ -1,214 +1,126 @@
 ---
 name: dynamic-workflows
-description: "Use when writing, debugging, or resubmitting a dynamic-workflow script for the CreateWorkflow tool: choosing subagent topology, typing subagent results, fanning out over files or git, gating loops on world.run commands, testing pieces with EvalWorkflowSnippet, planner-reviewer loops, confirming findings before reporting them, report() salvage, the report shape a run returns, publishing artifacts the user opens, leaving typed holes to fill mid-run, and handling a backgrounded run."
-when_to_use: "Only for CreateWorkflow scripts. A single delegation or a few independent lookups belong to the Agent tool instead."
+description: "编写、调试、重提交 ZCode 动态工作流（CreateWorkflow）脚本时使用：选择子代理拓扑、把子代理结果定成类型、按文件或 git 改动扇出、用 world.run 命令给循环做门禁、用 EvalWorkflowSnippet 预演片段、规划-评审循环、发现需独立复核后才上报、report() 保底交付、run 的报告形状、发布用户打开的产物、在运行中留洞待填、以及后台运行的收尾。用户说“用工作流”“创建工作流”“多子代理”“workflow”时触发。"
+when_to_use: "只用于 CreateWorkflow 脚本。单次委派或几个互不相干的查询，用 Agent 工具即可。"
 ---
 
-# Writing dynamic workflows
+# 编写动态工作流
 
-This skill is the whole authoring contract for `CreateWorkflow`. The tool descriptions are
-short on purpose; the facade the compiler checks against, the rules a script must satisfy and
-the fields each tool takes are in §16, and `CreateWorkflow`, `AmendWorkflow`, `FillWorkflowHole`,
-`SaveWorkflow` and `EvalWorkflowSnippet` refuse to run until this skill has been loaded. The
-rest is the judgment layer: how many subagents a request deserves, which of them should share
-a context, what each one should hand back, and how to keep the run's work from dying with the
-run.
+这份技能是 `CreateWorkflow` 的完整编写契约。工具描述刻意写得很短；编译器逐条检查的那份 facade、脚本必须满足的规则、每个工具接受的字段，都在 §16 里；在加载本技能之前，`CreateWorkflow`、`AmendWorkflow`、`FillWorkflowHole`、`SaveWorkflow`、`EvalWorkflowSnippet` 都会拒绝运行。其余部分是判断层：一个请求值几个子代理、哪些子代理该共享上下文、每个子代理该交回什么、以及怎样让这次运行的工作不会随运行一起失败。
 
-Two names collide in this codebase. `CreateWorkflow` is the dynamic-workflow tool and the
-only one this skill is about. The legacy `Workflow` tool and `/expert` are a different,
-older feature that happens to share the word.
+这个代码库里有两个名字容易混。`CreateWorkflow` 是动态工作流工具，也是本技能唯一讨论的对象。旧版的 `Workflow` 工具和 `/expert` 是另一套更早的功能，只是恰好共用了“workflow”这个词。
 
-## The bar: first-class, expert-level work
+## 目录
 
-A workflow exists to produce first-class, expert-level work — the deliverable a senior
-practitioner would hand over after doing the job properly, not a faster draft of what one
-reply could have said. A user who asks for a workflow is paying for that depth, and every
-choice in this skill serves it: enough subagents to actually cover the ground, fresh eyes
-on every plan and every draft (§3), an independent confirmation of every finding,
-deterministic checks wherever a command can decide, and a report that says what was
-verified, what was not, and what it all means.
-Depth is measured by what is at stake, not by how many subagents re-read the same work:
-verification goes where a wrong claim would cost the user something, and each piece of work
-gets the one check that decides it. When a shortcut and the expert's way disagree, take the
-expert's way; trim the work only when the task is small, and trim the checking when a wrong
-claim costs little or a command has already decided it.
+- §1 何时用、用多大
+- §2 子代理拓扑
+- §3 新眼睛
+- §4 类型化结果
+- §5 让世界进来
+- §6 提交前先测片段
+- §7 默认流水线；只在下一步需要全部结果时汇合
+- §8 用命名阶段组织运行
+- §9 为用户而写
+- §10 验证、汇报、交付
+- §11 完整示例
+- §12 反模式
+- §13 提交之后
+- §14 子代理升级提问时
+- §15 洞：让运行中的发现来写工作流
+- §16 工具参考
+- 延伸阅读
 
-## 1. Is this the right tool, and how big should it be?
+## 门槛：一等的、专家级的工作
 
-| The request | The tool |
+工作流存在的意义，是产出专家级的工作成果——一位资深从业者把活干漂亮之后交出来的东西，而不是把一个回复能说完的内容写得更快。用户点名要工作流，就是在为这份深度付费，本技能里的每个选择都服务于它：足够多的子代理真正覆盖工作面、每份计划和草稿都有新眼睛看（§3）、每条会被当成事实报告的发现都经过独立确认、能用命令判定的一律交给确定性检查、以及一份说清楚“验证了什么、没验证什么、整体意味着什么”的报告。
+
+深度由利害大小决定，不由“多少个子代理重复读同一份工作”决定：哪里判断错了会让用户付出代价，验证就放在哪里；每件工作配它真正需要的那一个检查。捷径与专家的做法冲突时，选专家的做法；只有在任务本身很小时才削减工作量，只有错误判断代价很低、或命令已经判定过时，才削减检查。
+
+## 1. 这是对的选择吗？脚本该多大？
+
+| 请求 | 工具 |
 | --- | --- |
-| One thing delegated to one agent | `Agent` |
-| A few independent lookups, nobody reading anybody's answer | `Agent`, in parallel |
-| Anything else the user did not name a workflow for, however many steps it needs | `Agent`, or do it yourself |
-| The user said "use a workflow" / "使用 workflow" / "用工作流" — any phrasing naming workflow as the means | `CreateWorkflow`, mandatory, even if `Agent` would have done or one reply could answer |
+| 一件事委派给一个代理 | `Agent` |
+| 几个独立查询，没人要读别人的答案 | `Agent`，并行 |
+| 用户没有点名工作流的任何其他多步任务 | `Agent`，或自己干 |
+| 用户说了“用工作流”/“use a workflow”/“用 workflow”——任何把工作流点名为手段的说法 | `CreateWorkflow`，强制使用，即使用 `Agent` 也能干、甚至一个回复就能答 |
 
-**Only an explicit request starts a workflow.** A workflow begins with `/workflow` or with
-the user naming workflow/工作流 as the means, never with your own judgement that a task
-looks orchestration-shaped. Results feeding later steps, a bounded loop, a branch on a typed
-result — those are shapes the script is good at once one has been requested, not reasons
-there should be one. Delegate with `Agent` or do the work yourself.
+**只有明确请求才启动工作流。** 工作流始于 `/workflow`，或用户把工作流/工作流点名为手段，绝不能始于“我自己判断这个任务看起来像编排形状”。结果喂给后续步骤、有界循环、按类型化结果分支——这些是脚本擅长、且已经被点名之后的形状，不是“应该有一个工作流”的理由。委派用 `Agent`，或者自己干。
 
-**An explicit request is binding.** Once the user names workflow/工作流 as the means, the
-routing question is closed — not `Agent`, not inline, not "too small for a workflow"; what
-remains is only how big the script should be, and the smallest task gets a small workflow.
+**明确的请求有约束力。** 一旦用户把工作流点名为手段，路由问题就关闭了——不是 `Agent`，不是内联，不是“对工作流来说太小”；剩下的只是脚本该多大，而最小的任务配一个小工作流。
 
-An explicit workflow request is a request for depth, and the bar above is the measure.
-Default to the thorough shape — a fresh subagent per unit of work, a deterministic gate
-wherever a command can decide, an independent confirmation of every finding the user will
-act on as fact (§10) — sized to the stakes: a bug the user will fix on your word gets a
-confirmer; a poem or a survey gets a reader at most. Every task is a full model session, so
-put sessions where they raise confidence, not where they repeat each other: "review the
-changed files" wants a reviewer per file plus a confirmer per finding; "write me twenty
-poems" wants twenty poets and no confirmers.
+明确的“要工作流”就是对深度的请求，上面的门槛就是尺子。默认采用彻底形态——每个工作单元一个新子代理、能由命令判定处一律确定性门禁、每条用户会当作事实的发现都独立确认（§10）——再按利害定尺寸：一个用户看你的话就动手修的 bug，配一个复核员；一首诗或一份调研，最多配一个读者。每个任务都是一次完整的模型会话，所以会话要放在能提高置信度的地方，而不是互相重复的地方：“评审改动的文件”要每个文件一个评审员、每条发现一个复核员；“写二十首诗”要二十个诗人、零个复核员。
 
-**Write only as much of that shape as you know for sure.** Where a later stage depends on
-what an earlier one finds, write up to that point, end in a hole (§15), and let the findings
-write the rest. Guessing a topology is not depth.
+**只写你确定知道的那部分形状。** 后续阶段依赖前一阶段发现什么时，就写到这里、以洞（§15）结尾，让发现来写剩下的。猜拓扑不是深度。
 
-## 2. Subagent topology
+## 2. 子代理拓扑
 
-This is the decision that separates a good script from a bad one. It is made twice: now,
-for what the request already tells you, and at a hole (§15), for what only the run can tell
-you. This section is about the first, in four parts.
+这是决定脚本好坏的选择，要做两次：现在做一次，针对请求已经告诉你的事；在洞（§15）里再做一次，针对只有运行才能告诉你的事。本节讲第一次，分四部分。
 
-**Fresh subagent per item, or one shared subagent?** Every `agent()` call creates a new context.
-Sharing a context means sharing the *variable*:
+**每项一个新子代理，还是一个共享子代理？** 每次 `agent()` 调用都会创建一个新上下文。共享上下文意味着共享那个*变量*：
 
 ```ts
-// Independent: each judge sees only its own item. Runs concurrently.
-items.map((i) => agent(`judge-${i.id}`).ask<Verdict>(`Judge ${i.id}`));
+// 独立：每个评审只看到自己那一项。并发运行。
+items.map((i) => agent(`judge-${i.id}`).ask<Verdict>(`评判 ${i.id}`));
 
-// Calibrated: one context sees every item in sequence, so its later verdicts are
-// consistent with its earlier ones. Asks on one subagent queue FIFO — this serializes.
-const judge = agent("judge", "You rank consistently across a whole batch.");
-items.map((i) => judge.ask<Verdict>(`Judge ${i.id}`));
+// 校准：一个上下文按顺序看完所有项，后面的判断与前文一致。同一子代理上的 ask 按 FIFO 排队——这会把并发变成串行。
+const judge = agent("judge", "你在一整批项目上保持同一套排序标准。");
+items.map((i) => judge.ask<Verdict>(`评判 ${i.id}`));
 ```
 
-Independent is right for unrelated items; shared is right when the answers must be
-consistent with each other, at the price of serialization. Hoisting the `agent()` call out
-of a loop for tidiness turns a fan-out into a queue, and nothing rejects that script.
+无关的项目适合独立；答案之间必须互相一致时适合共享，代价是串行化。为了整洁把 `agent()` 提到循环外面，会把扇出悄悄变成队列，而没有任何东西会拒绝这样的脚本。
 
-**A name is an identity, and it has to be unique.** No two subagents in one run may share a
-non-empty name — a duplicate fails the run. One fixed name inside a fan-out is a duplicate
-per item, so write `` agent(`judge-${i.id}`) ``; the compiler catches the literal form, a
-name built at run time costs you the run. Anonymous is always safe.
+**名字是身份，必须唯一。** 同一次运行里，两个非空名字相同的子代理会直接失败。扇出里用一个固定名字等于每项都重复，所以要写 `` agent(`judge-${i.id}`) ``；编译器能抓到字面量形式，运行期拼出来的名字会让你丢掉整次运行。匿名永远安全。
 
-Names are worth giving anyway: a **revised** re-run finds its cache by them (§13),
-importing every ask whose instructions did not change at zero tokens. Anonymous subagents
-start empty.
+名字仍然值得给：**修订**后的重跑按名字找到缓存（§13），把指令未变的所有 ask 零 token 导入。匿名子代理从空白开始。
 
-**Persona, frozen at creation.** A persona stacks on the harness's own subagent contract —
-citing `path:line`, never reporting a check it did not run, saying what it could not do,
-escalating instead of faking — so write the role and the standard of judgement and leave
-those rules out. Every subagent has the same tools; what it may do with them is said in the
-ask: a reviewer that must not touch the code is told "do not edit any file".
+**角色设定在创建时冻结。** persona 叠加在 harness 自己的子代理契约之上——引用 `path:line`、绝不报告自己没跑的检查、说出自己做不到什么、升级而不是造假——所以只写角色和判断标准，那些规则不用重复。每个子代理工具相同；它们能对工具做什么，写在 ask 里：一个不许碰代码的评审员，要在 ask 里告诉它“不要编辑任何文件”。
 
-**Per-subagent model**, only when the user asked for one, with the name they used:
-`agent("judge", { model: "GLM-5.3-Flash" })`, ids from `ListModels`. A literal or a `model()`
-ModelRef; to route, map the router's typed key to a `model()` table (`patterns.md` #13).
-NEVER move a subagent to a model under another provider on your own — not for a judge, not
-because it looks cheaper; another provider is another bill. When a lighter model would
-clearly fit (one-turn judges, routers) and the user has not said, ask them first, before
-the call: name the model and the provider, say what it would save, and go with their answer.
-Their yes is the request; write it as the full `providerId/modelId` (a bare name never
-crosses providers). Match the reasoning level to the work, too: a lighter model named for
-chores still defaults to its top reasoning tier and will re-derive at length what a regex
-knows — write extraction and form-filling agents at that model's `$low` (in
-`subagent_model` or the per-agent `model`), and spend the default tier on judgment.
+**按子代理指定模型**，只在用户点名时使用用户给的名字：`agent("judge", { model: "GLM-5.3-Flash" })`，id 从 `ListModels` 取。可以写字面量，也可以写 `model()` 的 ModelRef；要做路由，把路由器的类型化键映射到 `model()` 表（`patterns.md` #13）。**绝不要**自作主张把子代理移到用户没点名的另一个 provider 的模型上——不是为 judge，也不是因为看起来更便宜；另一个 provider 就是另一份账单。当更轻的模型明显合适（单轮 judge、路由器）、而用户没有表态时，先问：点名模型和 provider、说明能省什么、按用户的回答走。用户的“是”就是请求；写成完整的 `providerId/modelId`（裸名字不会跨 provider）。
 
-**Where each item goes next.** A run with more than one stage is a pipeline: an item leaves
-its stage as soon as it is done, and the next stage takes it while the rest are still being
-worked on. Decide this at every hand-off when you lay out the topology, and let a stage wait
-for all of its items only where the next step needs every one. §7 says how to write each case.
+**推理档位也要和活匹配。** 为杂活点名的轻量模型仍会默认落在最高推理档，用长篇推理重新推导一个正则就知道的答案——提取、填表类子代理写成该模型的 `$low`（`subagent_model` 或每个 agent 的 `model` 都行），默认档留给判断。
 
-**Loops.** Bound every loop with a round cap, and carry the feedback forward:
+**每一项接下来去哪里。** 超过一个阶段的运行是流水线：一项工作一完成就离开当前阶段，下一阶段在其余项目还在处理时就接手。布局时就要决定每个交接点的走向；只有下一步需要全部项目时，才让阶段等待所有项目。§7 讲每种情况怎么写。
 
-```ts
-let feedback = "none";
-for (let round = 0; round < 5; round++) {
-  const plan = await planner.ask<Plan>(`Plan the fix. Previous critique: ${feedback}`);
-  const review = await reviewer.ask<Review>(`Critique this plan: ${JSON.stringify(plan)}`);
-  if (review.approved) return plan;
-  feedback = review.feedback;
-}
-```
+## 3. 新眼睛
 
-Reuse the same two subagents across rounds: a subagent asked again keeps its context, so
-round five is cheap. Reuse costs freshness — by round three the reviewer is anchored on its
-own critique — so add an independent one at the end (§3).
+计划或草稿的作者看不见自己的空洞，因为写的时候已经被自己填上了。而一个独立上下文里没有这种“填充”，空洞就会显形。这就是全部方法，它适用于工作流内部每个产出草稿的阶段——计划、修复、发现、最终报告。它最值钱的地方是计划：批评计划便宜，按错计划执行很贵。
 
-**No nesting.** Subagents cannot call `CreateWorkflow`; model a big sub-task as more subagents
-here.
+四条规则让眼睛真正是新的：
 
-## 3. Fresh eyes
+- **独立上下文，不是同一个脑袋的第二个意见。** 独立读者是一个没见过任何草稿的新 `agent()`。每个规划-评审循环保留一个持久评审员以维持连续性（§2），然后把最终草稿交给一个从未看过任何一轮的评审员。
+- **要失败，不要批准。** 问“这好吗？”得到的是 yes。问“什么会弄坏它？缺了什么？用你自己的话复述这个计划”得到的是发现。把 ask 写成：批准需要证据，反对才是容易的动作。
+- **让眼睛看到同样的证据。** 评审员只凭计划文本判断代码，只能判断连贯性：告诉计划评审员去读计划涉及的文件，但不要编辑它们。
+- **给文字交付物配一次独立阅读。** 当交付物是没有任何其他东西检查过的文字——指南、分析——在脚本返回之前，交给一个读者代理，问它哪里不清楚、哪里文本支撑不了、用户接下来会问什么；然后修掉。它只凭文本判断，核对事实是复核员的活。报告类交付物如果每条发现都经过独立确认（§10），它的眼睛已经有人看过了，不必再加读者。
 
-The author of a plan or a draft cannot see its gaps, because they filled them while
-writing. A reader with a separate context has no such fill, so the gaps show. That is the
-whole method, and it applies at every stage *inside* the workflow where something is
-drafted — a plan, a fix, a finding, the final report. It pays most on plans, which are
-cheap to critique and expensive to execute wrongly.
+三个注意。相关性高的评审员帮助有限——同模型、同提示、同盲区——所以每人给一个不同的镜子。要有界：一个交付物只用一种机制——计划配读代码的评审员、发现配复核员、文字配读者；最多两种，而且你要能说出理由。这些规则说的是脚本*内部*的子代理，不是提交前的关卡：自己的脚本对照请求读一遍，每个 `Promise.all` 问一句下一步是否需要全部项目，不需要就流水线化（§7）。
 
-Four rules make the eyes actually fresh:
+## 4. 类型化结果
 
-- **Separate context, not a second opinion from the same head.** An independent reader is a new
-  `agent()` that has seen nothing but the draft. Every planner–reviewer loop keeps a
-  persistent reviewer for continuity (§2), and then puts the final draft in front of a
-  reviewer that has never seen an earlier round.
-- **Ask for failures, not approval.** "Is this good?" gets a yes. "What would break this?
-  What is missing? Restate the plan in your own words" gets findings. Write the ask so
-  that approving takes evidence and objecting is the easy move.
-- **Give the eyes the same evidence.** A reviewer judging a plan about code from its text
-  alone can only judge coherence: tell plan reviewers to read the files the plan touches,
-  and not to edit them.
-- **Give a prose deliverable an independent read.** When the deliverable is text nothing else
-  checked — a guide, an analysis — hand it, before the script returns, to a reader-proxy
-  subagent asked what is unclear, what the text fails to support, and what the user will ask
-  next; then fix those. Say it judges from the text alone — checking claims is a confirmer's
-  job. A report whose
-  findings were each confirmed (§10) has had its eyes; add no reader on top.
+只要控制流会基于答案分支，就给 `ask` 传类型参数；只想拿回一段文字时可以不传。类型必须是你在脚本里定义的 interface 或 type alias。
 
-Three cautions. Correlated reviewers add little — same model, same prompt, same blind spots
-— so give each a distinct lens. Bound it: one deliverable gets one mechanism — a plan a
-reviewer who reads the code, findings a confirmer, prose a reader; two is the ceiling, with
-a reason you can say. And these rules are about the subagents *inside* the script, not a gate
-on submitting it: read your own script once against the request, and at every `Promise.all`
-ask whether the next step needs every item; where it does not, pipeline it (§7). The
-confirmation window then puts the plan in front of the user.
-
-## 4. Typed results
-
-Pass a type argument to `ask` whenever your control flow will branch on the answer; leave it
-off when you just want prose back. The type must be an interface or type alias you write in
-the script.
-
-**JSDoc on a property becomes the field description the subagent actually reads.** This is the
-cheapest quality lever in the whole surface and the easiest to skip:
+**属性上的 JSDoc 会变成子代理实际读到的字段说明。** 这是整个接口面上最便宜的质量杠杆，也最容易被跳过：
 
 ```ts
 interface Finding {
-  /** Workspace-relative path the problem is in. */
+  /** 问题所在的工作区相对路径。 */
   path: string;
-  /** One sentence: what is wrong, not how to fix it. */
+  /** 一句话：哪里错了，不要写怎么修。 */
   problem: string;
-  /** How much it matters. Reserve "high" for data loss or a crash. */
+  /** 影响程度。"high" 只留给数据丢失、崩溃或错误结果。 */
   severity: "low" | "medium" | "high";
 }
 ```
 
-Without the comments you get whatever the subagent guessed `severity` meant.
+没有这些注释，你拿到的是子代理自己猜的 `severity` 含义。
 
-Keep results narrow: a result crosses a schema boundary and gets interpolated into the next
-prompt, so a wide one costs tokens twice. **Pass paths, not file contents** — a subagent has
-its own file tools; a stringified 4000-line file spends tokens on what it could have read.
+结果要保持窄：结果跨越一次 schema 边界，还会被插值进下一个提示，过宽的结果要花两次 token。**传路径，不传文件内容**——子代理有自己的文件工具；把一个 4000 行的文件塞进字符串，等于为它本可以自己读的内容花 token。
 
-## 5. Getting the world in
+## 5. 让世界进来
 
-`files.glob` and `git.changedFiles` are how a script learns what to fan out over; both are
-executed by the harness, recorded, and replayed on resume.
+`files.glob` 和 `git.changedFiles` 是脚本了解“要对什么扇出”的方式；两者都由 harness 执行、记录，并在恢复时重放。
 
-Caps **reject rather than truncate** (§16.2), so narrow the pattern instead of fanning out
-over a silently partial view. Reads are catchable, so a coarser fallback is a `catch` —
-which `git` needs, since every `git` call rejects outside a repository:
+上限会**拒绝**而不是截断（§16.2），所以要收窄模式，而不是对一个悄悄不完整的视图做扇出。读取是可捕获的，粗一点的兜底可以用 `catch`——`git` 必须这样做，因为它在仓库之外每次调用都会拒绝：
 
 ```ts
 let paths: string[];
@@ -219,239 +131,171 @@ try {
 }
 ```
 
-Reach for `files.read` or `files.grep` only when the *script itself* must shard or branch on
-content; reading files is subagent work.
+只有当*脚本本身*必须按内容分片或分支时，才用 `files.read` 或 `files.grep`；读文件是子代理的活。
 
-**`world.run` is the deterministic gate.** When a check is fixed and machine-checkable — the
-build passes, the proof checks, the tests are green — run it as code and branch on the exit
-code, instead of asking a subagent to run it and trusting the claim:
+**`world.run` 是确定性门禁。** 当某个检查是固定且机器可判定的——构建过没过、证明验没验过、测试绿没绿——把它当代码运行，并对退出码分支，而不是让子代理去跑、再相信它的说法：
 
 ```ts
 const check = await world.run("lake", ["build"], { timeoutMs: 1_800_000 });
 if (check.exitCode !== 0) feedback = check.stderr;
 ```
 
-A nonzero exit code is a **value**, not an exception: read `exitCode` and carry `stderr`
-forward as the next round's feedback, with no `catch`; rejections are for the world failing
-to answer (spawn failure, timeout, output over the cap). The command name must be a
-compile-time string literal, because the user approves the script's command set at
-confirmation: interpolate paths, flags and round numbers into the **args array**, never into
-the command. Open-ended editing belongs to a subagent; `world.run` is for checks your
-control flow branches on.
+非零退出码是一个**值**，不是异常：读 `exitCode`，把 `stderr` 带进下一轮当反馈，不要 `catch`；rejection 只留给世界无法回答的情况（spawn 失败、超时、输出超过上限）。命令名必须是编译期字面量，因为用户在确认时会看到脚本的命令集合：把路径、参数、轮次号插值进 **args 数组**，绝不插进命令名。开放式编辑属于子代理；`world.run` 留给控制流要分支的检查。
 
-**Parse what code can parse.** A check whose output has a fixed shape — JSON the tool
-prints, a summary line, a verdict the format guarantees — is extracted by the script
-(`JSON.parse` on the stdout tail, a regex on the verdict line) and branched on or returned,
-not handed to a subagent asked to read the output. A model session is for output whose
-meaning needs reading: free-form logs, "does this failure look environmental", "which of
-these ten diffs matters". Paying a session — at its default reasoning level — to copy
-numbers out of JSON the script already holds is the most common way a cheap run becomes an
-expensive one. When the text really does need a session, still feed it the smallest slice
-that answers, or a path to a file it can read, never the whole transcript inline.
+**能 parse 的，别让模型读。** 输出形状固定的检查——工具打印的 JSON、总结行、格式保证的判定行——由脚本解析（对 stdout 尾部 `JSON.parse`、对判定行跑正则），然后分支或返回，不要交给一个子代理去读输出。模型会话留给需要“读懂”的输出：自由格式日志、“这个失败看起来像不像环境问题”、“这十份 diff 里哪份重要”。让一个会话——还是默认推理档——把脚本已经拿在手里的 JSON 里的数字抄出来，是一条便宜运行变贵的最常见方式。当文字确实需要一个会话时，仍然只喂能回答问题的那个最小切片，或者喂它能自己读的文件路径，绝不把整份记录内联进去。
 
-**Choose the gate before you write it.** A gate decides exactly as much as the check it
-runs. Before the first `world.run`, find out what checks the repository has — `package.json`
-scripts, `Makefile` targets, the CI config, the README's "run this to verify" line — and
-rank them by how much they decide: a unit suite decides less than an end-to-end suite, which decides less than
-the acceptance command the README names, and none decides a performance request the way
-the bench does. Then build the gate in two tiers: the fast tier may drive a loop's rounds;
-the **strongest** tier the request implies decides the exit and runs for real at least once
-before the final `return`, even when the fast tier said yes. Give a slow tier the
-`timeoutMs` it needs; a faster substitute is a different check.
+**先在仓库里挑好门禁，再写它。** 门禁能决定多少，取决于它跑的那个检查。第一次 `world.run` 之前，先弄清仓库有哪些检查——`package.json` 脚本、`Makefile` target、CI 配置、README 里写的“这样验证”——并按决定力排序：单元套件不如端到端套件，端到端不如 README 点名的验收命令，而性能类请求只有基准能判。然后分两档建门禁：快档可以驱动循环的轮次；请求隐含的**最强**档决定退出，并且在最终 `return` 之前真的跑一次，即使快档已经说了 yes。慢档要给足 `timeoutMs`；更快的替代品是另一个检查。
 
 ```ts
-phase("Fix until the unit tests pass");
+phase("修改到单元测试通过");
 for (let round = 1; round <= 5; round++) {
   const unit = await world.run("npm", ["test"]);
   if (unit.exitCode === 0) break;
-  await fixer.ask(`The unit tests failed:\n${unit.stderr}\nFix them.`);
+  await fixer.ask(`单元测试失败了：\n${unit.stderr}\n修好它。`);
 }
 
-phase("Run the end-to-end suite once before handing over");
+phase("交付前把端到端套件跑一次");
 const e2e = await world.run("npm", ["run", "e2e"], { timeoutMs: 1_800_000 });
 const verified = e2e.exitCode === 0;
 ```
 
-A check that exists in the repository and did not run is not "not covered"; it is
-unverified work (§10).
+仓库里存在却没有运行的检查，不是“未覆盖”，是未经验证的工作（§10）。
 
-## 6. Test the pieces before you commit
+**跨平台命令的两个坑（Windows 实证）。** `world.run` 直接 spawn、不过 shell：
+- `npm` 在 Windows 上是 `npm.cmd`，直接 spawn 会 ENOENT/EINVAL；用 `world.run("cmd", ["/c", "npm", ...])`，整条命令写进 args。
+- `bash` 可能解析到系统目录里的 WSL 壳（报 `execvpe(/bin/bash) failed`）；要跑 Bash 脚本，用 Git Bash 全路径并加 `-l` 登录参数，让 `/usr/bin` 进 PATH：`world.run("C:\\Program Files\\Git\\bin\\bash.exe", ["-l", "scripts/verify.sh"])`。
+- 同理，脚本里写死 `npm test` 这类 bash 片段前，先确认目标平台；跨平台仓库把命令写成“平台 → argv”的显式分支，别猜。
 
-A workflow script is final at submit. The fixed logic inside it does not have to be: run it
-through the `EvalWorkflowSnippet` tool first (§16.6), synchronously and without persisting
-anything. What passed there pastes into the workflow verbatim. Send the snippet
-as `code`, or as `path` to a file holding it — the second try then costs an `Edit`.
+## 6. 提交前先测片段
 
-Snippet work is the non-subagent part: what a glob really returns, whether a grep pattern
-overruns its cap, how `world.run("lean", ...)`'s stderr parses, whether a gate predicate does
-what you meant. A snippet has `files.*`, `git.*`, `world.run` and `log`, but no `agent()`.
-Once you know which check decides the result (§5), run it once here too: that shows its
-output, whether it exits nonzero as you assumed, and how long it takes — the `timeoutMs` you
-write, not a guess.
+工作流脚本在提交那一刻就定稿了。脚本里固定的逻辑不必定稿：先用 `EvalWorkflowSnippet` 工具（§16.6）同步跑一遍，不落任何持久痕迹。那里通过的部分原样粘进工作流。片段用 `code` 传，或用 `path` 指向文件——第二次试错就变成一次 `Edit`。
 
-## 7. Pipeline by default; join only where the next step needs every item
+片段工作是不涉及子代理的那部分：一个 glob 实际返回什么、一个 grep 模式会不会超上限、`world.run("lean", ...)` 的 stderr 怎么解析、门禁谓词是不是按你想的判定。片段有 `files.*`、`git.*`、`world.run` 和 `log`，但没有 `agent()`。一旦知道哪个检查决定结果（§5），就在这里也跑一次：看它的输出、是否像你假设的那样非零退出、耗时多久——`timeoutMs` 要按实测写，不是猜。
 
-A workflow with more than one stage should run like a pipeline: every stage works at the
-same time, and each item moves on the moment it is ready. A reviewed file goes to its
-confirmer while the other files are still being reviewed; a fact goes to its checker while
-the researchers are still reading. Write it this way wherever the next step can take items
-one at a time, which is nearly every hand-off. Let a stage wait for all of its items only
-where the next step needs every one: a deduplication across files, a ranking on one scale, a
-synthesis. Those are the barriers, and a script has few of them.
+## 7. 默认流水线；只在下一步需要全部项目时汇合
 
-`Promise.all` is a join, and a join is a barrier: nothing after it starts until the slowest
-item before it has landed. Parallelism comes from *not awaiting yet*:
+超过一个阶段的工作流应该像流水线：每个阶段同时工作，每项一完成就进入下一阶段。被评审的文件在其余文件还在评审时就进入复核；一条事实在研究者还在阅读时就进入核对。只要下一步能逐项接手，就这样写——几乎每个交接点都如此。只有当下一步需要全部项目时才让阶段等待：跨文件去重、在一个尺度上排序、综合。那些才是栅栏，脚本里栅栏很少。
+
+`Promise.all` 是汇合，汇合就是栅栏：它之前的所有工作都在最慢一项落地后才继续。并行来自*不急着 await*：
 
 ```ts
-// Concurrent: nothing is awaited until the join.
+// 并发：在汇合之前什么都不 await。
 const all = await Promise.all(
-  paths.map((p) => agent(`reviewer-${p}`).ask<Review>(`Review ${p}`)),
+  paths.map((p) => agent(`reviewer-${p}`).ask<Review>(`评审 ${p}`)),
 );
 
-// Serial: each await blocks the next call. Only write this when you mean it.
-for (const p of paths) results.push(await agent(`reviewer-${p}`).ask<Review>(`Review ${p}`));
+// 串行：每次 await 都阻塞下一次调用。只有确实想串行时才这样写。
+for (const p of paths) results.push(await agent(`reviewer-${p}`).ask<Review>(`评审 ${p}`));
 ```
 
-**Decide, at every hand-off, how an item leaves its stage:**
+**在每个交接点决定：一项工作怎样离开它的阶段。**
 
-| The next step takes | The stages | Write |
+| 下一步怎么接 | 阶段形态 | 写法 |
 | --- | --- | --- |
-| one item at a time | one to one: a reviewer per file, a confirmer per finding, a migrator per file and a checker per file | the stages chained per item inside one fan-out, one join at the end |
-| one item at a time | a pool of shared workers serves a stage; items are still being found while the next stage works; a later stage sends work back; the stages read better as separate blocks | a `channel` between the stages, a `future` per stage |
-| every item at once | deduplication, a ranking on one scale, a synthesis, the final report | a join, with a comment saying what needs every item |
+| 一次接一项 | 一对一：每文件一个评审员、每发现一个复核员、每文件一个迁移器加一个检查员 | 阶段在同一个扇出回调里逐项链起来，最后汇合一次 |
+| 一次接一项 | 共享工作池服务一个阶段；项目还在被发现时下一阶段已在工作；后面的阶段会把活送回前一阶段；写成独立块更清楚 | 阶段之间用 `channel`，每个阶段一个 `future` |
+| 一次要全部 | 去重、在一个尺度上排序、综合、最终报告 | 汇合，并写注释说明为什么需要全部项目 |
 
-**Chaining.** When two stages map one to one, a barrier between them makes every worker of
-the second stage wait for the slowest worker of the first while the run's concurrency slots
-sit idle. Chain the stages per item inside the fan-out instead, and join once at the end:
+**链式。** 两个阶段一对一映射时，中间加栅栏会让第二阶段的每个 worker 等第一阶段最慢的 worker，而并发槽位在空转。把阶段在扇出回调里逐项链起来，最后只汇合一次：
 
 ```ts
-// One join: each file's findings go to their confirmers the moment its review lands
-// (two Promise.all — review every file, then confirm every finding — is the barrier).
+// 一次汇合：每个文件的发现一落地就进入复核员（两个 Promise.all——先评审所有文件、再复核所有发现——就是栅栏）。
 const confirmed = (
   await Promise.all(
     paths.map(async (p) => {
-      const review = await agent(`reviewer-${p}`).ask<Review>(`Review ${p}`);
+      const review = await agent(`reviewer-${p}`).ask<Review>(`评审 ${p}`);
       return Promise.all(
-        review.findings.map((f, i) => agent(`confirmer-${p}-${i}`).ask<Confirmation>(`Reproduce: ${JSON.stringify(f)}`)),
+        review.findings.map((f, i) => agent(`confirmer-${p}-${i}`).ask<Confirmation>(`复现：${JSON.stringify(f)}`)),
       );
     }),
   )
 ).flat();
 ```
 
-A shared, calibrated subagent is not a barrier: asks on it queue first in, first out, so feed
-it each item as it lands and it stays consistent while the pipeline keeps moving (§11).
+一个共享、已校准的子代理不是栅栏：它上面的 ask 按先进先出排队，所以每项一落地就喂进去，它在保持一致的同时，流水线继续移动（§11）。
 
-One rejection inside `Promise.all` rejects the whole join and the sibling results with it.
-When one bad item should cost one item, catch inside the callback (examples #3) or use
-`Promise.allSettled` and read each outcome.
+`Promise.all` 里任何一个 rejection 都会拒掉整个汇合并带走旁边的结果。当一项坏掉应该只损失一项时，在回调内部 `catch`（示例 #3），或者用 `Promise.allSettled` 读每个结果。
 
-**Channels.** Chaining covers stages that map one to one. It cannot write a stage served by a
-pool of shared workers, a producer still finding items while consumers work, stages laid out
-as separate blocks, or a feedback loop to an earlier stage. For those, a `channel<T>()`
-carries items between two stages and each stage is a `future(async () => { … })`. An item
-sent into the channel is taken by the next stage at once, by a worker that is waiting for it
-or by a new one started for it:
+**通道。** 链式覆盖一对一映射的阶段。它写不了一个由共享工作池服务的阶段、一个项目还在被发现时消费者已在工作的生产者、拆成独立块的阶段、或回送到更早阶段的反馈环。这些情况用 `channel<T>()` 在两个阶段之间传项目，每个阶段是一个 `future(async () => { … })`。送进通道的项目立即被下一阶段接走，要么由已经在等的 worker 接，要么为它新开一个：
 
 ```ts
 const facts = channel<Fact>("facts");
 const verified: Fact[] = [];
 
 const research = future(async () => {
-  phase("Research the topic from each angle");
+  phase("从各个角度研究主题");
   try {
     await Promise.all(
       angles.map(async (angle) => {
-        const found = await agent(`researcher-${angle}`).ask<Research>(`Research ${angle}.`);
+        const found = await agent(`researcher-${angle}`).ask<Research>(`研究 ${angle}。`);
         for (const fact of found.facts) facts.send(fact);
       }),
     );
   } finally {
-    facts.close(); // the producer side owns the close; a failed researcher still ends the stream
+    facts.close(); // 生产侧负责关闭；一个研究者失败也要让流结束
   }
 });
 
 const verify = future(async () => {
-  phase("Check each fact as it arrives");
+  phase("每条事实一到就核对");
   await Promise.all(
     [1, 2, 3].map(async (k) => {
       const verifier = agent(`verifier-${k}`);
       for await (const fact of facts) {
-        const verdict = await verifier.ask<Verdict>(`Does this hold? ${JSON.stringify(fact)}`);
+        const verdict = await verifier.ask<Verdict>(`这成立吗？${JSON.stringify(fact)}`);
         if (verdict.holds) verified.push(fact);
       }
     }),
   );
 });
 
-await Promise.all([research, verify]); // start every stage, then join once
+await Promise.all([research, verify]); // 启动所有阶段，然后汇合一次
 ```
 
-The rules, in the order the code reads:
+按代码阅读顺序，规则是：
 
-- **A stage is a future.** Its marker first, then the workers (a `Promise.all` over K
-  `for await` loops on the input channel), then the output's `close()` in a `finally`. Start
-  every stage, then join all of them once with `Promise.all`, with no `await` between: while
-  you await one stage, a failure in another has no listener and surfaces as an unhandled
-  rejection instead of failing the run with its error.
-- **A channel where the next stage should start before the previous one ends; a join where it
-  needs every item.** Never a channel between two stages that need a barrier.
-- **A new subagent per item inside a consumer is a `future` inside the `for await`**, pushed
-  into an array and joined before the stage ends (examples #6); without that join the stage
-  ends when the channel closes with checks still running, and nothing reports it.
-- **A cycle is counted.** A feedback channel (a verifier sends a doubtful fact back for more
-  research) has no single producer who knows when it is done, so keep one count of open work
-  items: increment *before* finishing the item that produced the new work, close the feedback
-  channel when the count hits zero, bound the loop with a depth field on the item
-  (`patterns.md` #12).
-- **Pools trade cache reuse for consistency.** A pool of shared workers (`verifier-1…3`
-  above) judges on one scale, but which item lands on which worker depends on timing, so an
-  amendment that changes one upstream item misses the cache for the whole pool; a fresh
-  `verifier-${fact.id}` per item misses only itself. `send` never waits (the buffer is
-  unbounded); a channel nobody can send to any more fails the run as `ChannelDeadlock`.
+- **阶段是一个 future。** 先打标记，再写 worker（对输入通道的 K 个 `for await` 循环组成的 `Promise.all`），最后在 `finally` 里关闭输出的 `close()`。启动所有阶段，然后一次 `Promise.all` 汇合，中间不要 `await`：你 await 一个阶段时，另一个阶段的失败没有监听者，会变成未处理的 rejection，而不是让运行失败。
+- **下一阶段应该在前一阶段结束前启动时用通道；需要全部项目时用汇合。** 绝不要在两个需要栅栏的阶段之间放通道。
+- **消费者里每项一个新子代理时，`for await` 内部用 `future`**，推进数组，在阶段结束前汇合（示例 #6）；没有这个汇合，通道关闭时阶段就结束了，检查还在跑而没人报告。
+- **环是有计数的。** 反馈通道（核对员把可疑事实送回继续研究）没有单一生产者知道何时结束，所以要维护一个未完成工作项计数：在产出新项的那项完成*之前*加一，计数归零时关闭反馈通道，用项目上的 depth 字段给环设上限（`patterns.md` #12）。
+- **工作池用缓存换一致性。** 共享 worker 池（上面的 `verifier-1…3`）在一个尺度上判断，但哪项落到哪个 worker 取决于时序，所以修订改动一个上游项目会让整个池的缓存失效；每项一个新 `verifier-${fact.id}` 只损失它自己。`send` 从不等待（缓冲区无界）；再也没人能发送的通道会让运行以 `ChannelDeadlock` 失败。
 
-**Keep the data flow visible.** The harness recovers the dependency graph by reading your
-code before it runs: plain variables, template interpolation, destructuring and small local
-helpers are traced exactly; a result stashed in a container or behind an indirection earns a
-diagnostic.
+**让数据流看得见。** harness 运行前通过读代码恢复依赖图：普通变量、模板插值、解构和小型本地 helper 都能精确追踪；把结果藏进容器或藏在间接层后面会换来一条诊断。
 
-## 8. Group the run into named phases
+## 8. 用命名阶段组织运行
 
-Phases are required. The user experiences a workflow through its phase graph: the
-confirmation dialog is drawn one node per phase, and thirty step cards is a dialog nobody
-reads. Cover the whole script — every stage gets a `phase("...")` marker at its head; the
-arrows between phases are inferred:
+阶段是必填的。用户通过阶段图体验工作流：确认对话按阶段画节点，三十张步骤卡是没人读的对话。覆盖整个脚本——每个阶段的头部都有一个 `phase("...")` 标记；阶段之间的箭头是推断出来的：
 
 <!-- compile -->
 ```ts
 interface Attempt {
-  /** One sentence: the optimization this round is trying. */
+  /** 一句话：本轮尝试的优化是什么。 */
   approach: string;
 }
 
-/** Total nanoseconds the bench reports, or Infinity when it printed none. */
+/** 基准报告的纳秒总耗时；没打印数字时返回 Infinity。 */
 function benchNanos(output: string): number {
   const match = /time:\s*([\d.]+) ns/.exec(output);
   return match?.[1] === undefined ? Number.POSITIVE_INFINITY : Number(match[1]);
 }
 
-phase("Measure today's baseline");
+phase("测量今天的基线");
 const baseline = await world.run("cargo", ["bench"], { timeoutMs: 1_800_000 });
 const target = benchNanos(baseline.stdout);
 const optimizer = agent("optimizer");
 
 let winner = "none";
 for (let round = 1; round <= 3; round++) {
-  phase("Make one improvement");
+  phase("做一项改进");
   const plan = await optimizer.ask<Attempt>(
-    `Round ${round}. Baseline timings:\n${baseline.stdout}\nMake one improvement.`,
+    `第 ${round} 轮。基线耗时：\n${baseline.stdout}\n做一项改进。`,
   );
 
-  phase("Check that the tests still pass");
+  phase("确认测试仍然通过");
   const check = await world.run("cargo", ["test"]);
   if (check.exitCode !== 0) continue;
 
-  phase("Measure whether it is actually faster");
+  phase("测量是否真的更快");
   const bench = await world.run("cargo", ["bench"], { timeoutMs: 1_800_000 });
   if (bench.exitCode === 0 && benchNanos(bench.stdout) < target) {
     winner = plan.approach;
@@ -459,506 +303,307 @@ for (let round = 1; round <= 3; round++) {
   }
 }
 
-phase("Collect the final numbers");
+phase("收集最终数字");
 const head = await world.run("git", ["rev-parse", "HEAD"]);
 return { approach: winner, commit: head.stdout.trim() };
 ```
 
-Five nodes, with an arrow back from the bench to "Make one improvement" — and still five
-when the real script grows to thirty steps: the user sees the story instead of a wall of
-cards.
+五个节点，从基准回到“做一项改进”有一条箭头——真实脚本长到三十步时它仍然是五个：用户看到的是故事，不是一墙卡片。
 
-The unit tests are the fast tier that drives the rounds; the bench is the check the request
-was about, and it decides every round that survives them, not once at the start (§5).
+单元测试是驱动轮次的快档；基准是请求真正在意的那个检查，它决定每一轮活下来的尝试，而不是只在开头测一次（§5）。
 
-**Write the names for the user, not for the graph.** A phase name is a short natural
-phrase saying what this stage accomplishes for the user, written in the language the
-user is speaking in this session — "Research each changed file in parallel",
-"汇总并产出最终报告" (§9). Names are compile-time string literals, so you cannot number
-rounds by interpolation, and should not want to: two markers with the same name are one
-node, so a loop body stays one box across its rounds.
+**给用户写名字，不是给图写名字。** 阶段名是一句简短的自然语言，说明这个阶段为用户完成了什么，用这个会话里用户说的语言写——“并行研究每个改动的文件”“汇总并产出最终报告”（§9）。名字是编译期字面量，所以不能靠插值编号，也不该想这么做：两个同名标记是一个节点，所以循环体在每轮里都是一只盒子。
 
-**Put the marker where the steps are.** A marker claims the rest of the block it sits in,
-nested blocks and inlined helper calls included, so mark the block where the `ask` and
-`world.run` calls actually live.
+**把标记放在步骤所在的块里。** 标记认领它所处块的后半段，嵌套块和内联 helper 调用都算，所以把标记放在 `ask` 和 `world.run` 真正调用所在的块。**不要放在并发扇出回调里。** 二十个 `map(async …)` 回调乱序重入 `phase("评审")` 会把每次重入算成一轮。逐项流水线（§7）是一个阶段，名字写它对每项做了什么，标记放在它上面的顶层。**并发阶段写成 future 时，每个 future 体开头放一个标记。** 打标是按词法作用域做的——步骤属于分析器放置它的阶段，而不是引擎最后执行到的标记——所以两个同时运行的阶段各自保持自己的步骤；回调或 `for await` 体里依然不放标记。**每个阶段至少要有一个 `ask` 或一个 `world.run`。** 纯脚本逻辑——读 `args`、拼提示、构造 `return`——不显示进度，不是阶段：折进前一个或后一个阶段，别为顶部的准备、底部的 `return`、或只做 `report`/`log` 叙述的分支单开阶段。
 
-**Not inside a concurrent fan-out callback.** Twenty `map(async …)` callbacks re-entering
-`phase("Review")` out of order would count every re-entry as a round. A per-item pipeline
-(§7) is one phase named for what it does to each item, with the markers at the top level
-around it.
+## 9. 为用户而写
 
-**One marker at the head of each stage's future.** Concurrent stages written as futures (§7)
-each open their body with their own `phase("...")`. Stamping is lexical — a step gets the
-phase the analyzer places it in, not the marker the engine passed last — so two stages
-running at once keep their own steps; still no marker in the per-item callback or the
-`for await` body.
+有六样东西是用户读的，不是脚本读的：阶段名、子代理名、`log` 行、产物标题与发布的 markdown、报告四字段、以及子代理升级时问的问题。每一样都写成跟同事隔着桌子说“正在发生什么”的样子：用用户的话和语言写清工作是什么。机器概念——扇出、门禁、节点、阶段、流水线——是你的，不是他们的，编号也是。
 
-**Every phase must contain at least one `ask` or one `world.run`.** Plain script logic —
-reading `args`, shaping a prompt, building the `return` — shows no progress, so it is not a
-stage: fold it into the phase before or after it, and open none for the setup at the top,
-the `return` at the bottom, or a branch that only narrates with `report` and `log`.
-
-## 9. Write for the user
-
-Six things you write are read by the user, not by the script: phase names, subagent names,
-`log` lines, artifact titles and the markdown you publish, the four report fields, and any
-question a subagent escalates. Write each one as you would tell a colleague across the desk
-what is happening: what the work is, in the user's words and language. The machinery —
-fan-out, gate, node, stage, pipeline — is yours, not theirs, and so is the numbering.
-
-| Read by the user | Write | Not |
+| 用户读到的位置 | 写 | 别写 |
 | --- | --- | --- |
-| Phase name | Review each changed file / 逐个检查改动的文件 | Fan-out review stage / 文件评审阶段 |
-| Phase name | Check that the tests still pass / 确认测试仍然通过 | Gate: test verification / 执行测试验证任务 |
-| Subagent name | Code reviewer / 代码评审员 | reviewer_2 / 节点3 |
-| Subagent name | Benchmark runner / 跑基准测试的人 | runner / 子代理A |
-| Phase name | Independent review of the final plan / 请没看过方案的人再审一遍 | Cold read of the plan / 冷读方案 |
-| Subagent name | Independent reviewer / 独立评审员 | cold-reviewer / 冷眼评审 |
-| `log` line | Reviewing 12 changed files / 正在检查 12 个改动的文件 | Fan-out sized: n=12 / 扇出阶段初始化完成 |
-| Report conclusion | Two of the twelve files have real bugs, both in the parser. / 12 个文件里有 2 个有真问题，都在解析器里。 | The workflow executed successfully and produced findings. / 工作流已成功执行并生成结果。 |
-| Artifact title | Review report / 评审报告 | report-artifact-v1 / 产物输出 |
-| Escalation question | Should the threshold be 94 rather than 96? / 阈值应该是 94 而不是 96 吗？ | Requesting clarification regarding gate configuration parameters / 请求对门控配置参数进行澄清 |
+| 阶段名 | 逐个检查改动的文件 | 扇出评审阶段 |
+| 阶段名 | 确认测试仍然通过 | 门禁：测试验证任务 |
+| 子代理名 | 代码评审员 | reviewer_2 |
+| 子代理名 | 跑基准测试的人 | runner |
+| 阶段名 | 请没看过方案的人再审一遍 | 冷读方案 |
+| 子代理名 | 独立评审员 | cold-reviewer |
+| `log` 行 | 正在检查 12 个改动的文件 | 扇出规模：n=12 |
+| 报告结论 | 12 个文件里有 2 个有真问题，都在解析器里。 | 工作流已成功执行并生成结果。 |
+| 产物标题 | 评审报告 | report-artifact-v1 |
+| 升级问题 | 阈值应该是 94 还是 96？ | 请求对门控配置参数进行澄清 |
 
-The method names in this skill — fresh eyes, independent read — are idioms for you, not
-words for the user: in Chinese that is 独立复核 or 换人复审, never 冷读 or 冷眼.
-The language travels through your asks: findings and summaries are written by subagents
-answering the ask you wrote, so write asks in the user's language, or say which language to
-answer in; otherwise a Chinese report arrives wrapping English findings.
+技能里的方法名——new eyes、independent read——是给你用的行话，不是给用户看的词：中文里说“独立复核”“换人复审”，不说“冷读”“冷眼”。语言会顺着你的 ask 传下去：发现和总结是子代理按你写的 ask 回答的，所以 ask 要用用户的语言写，或明确要求用哪种语言回答；否则一份中文报告会包着英文发现回来。
 
-## 10. Verify, report, deliver
+## 10. 验证、汇报、交付
 
-`log(...)` is narration for the human watching the run: after a fan-out is sized, at the top
-of each loop round.
+`log(...)` 是给看运行的人旁白：扇出定尺寸之后、每个循环轮次的头部。**报告之前先验证，投入程度与错误声明的代价成正比。** 验证的存在是为了降低“用户照着你的错话行动”的代价，所以要放在代价真实的地方：用户会动手修的 bug、安全声明、会被引用的数字、决策所依赖的事实。这一类的每条发现，在到达用户之前都要独立确认：一个只凭证据复现发现的第二子代理（读代码、能跑检查就跑检查，绝不编辑），或者一个能判定的 `world.run` 命令。发现者不确认自己的发现。确认失败的发现**保留并标注** `unconfirmed`，绝不悄悄丢弃——复核员复现不了的真实问题仍然值得人看一眼，标注让用户分清“看到过”和“怀疑”。
 
-**Verify before you report, in proportion to what a wrong claim costs.** Verification
-exists to buy down the cost of the user acting on something false, so it goes where that cost
-is real: a bug they will fix, a security claim, a number they will quote, a fact a decision
-rests on. Each finding of that kind is confirmed independently before it reaches the user: a
-second subagent that reproduces the finding from its evidence alone — reading the code,
-running a check when one decides it, never editing — or a `world.run` command when one can
-decide. The reviewer that found it does not confirm it. A finding that fails confirmation
-is **kept and labelled** `unconfirmed`, never silently dropped — a real issue the confirmer
-could not reproduce is still worth a human's eyes, and the label tells the user "seen" from
-"suspected".
+三种看起来像验证、实际是浪费的做法。对一个 `world.run` 已经判定过的发现再派复核员：退出码就是确认，把命令记进 `verified`。对没人会当事实行动的工作（诗、头脑风暴选项、初稿调研）派复核员：最多配一次独立阅读（§3）。同一套测试被猎手、复核员和门禁各跑一遍：门禁由脚本跑一次，ask 里明确说“脚本之后会跑全量套件，你不要跑”。
 
-Three things that look like verification and are waste. A confirmer on a finding a
-`world.run` already decided: the exit code is the confirmation; record the command in
-`verified`. A confirmer on work nobody will act on as fact — poems, brainstormed options, a
-first-draft survey — which gets at most one independent read (§3). A suite run three times
-because the hunter, the confirmer and the gate each ran it: a gate runs once, by the script,
-and the asks say so ("the script runs the full suite after you; do not run it yourself").
+**门禁按任务的尺度设。** `verified` 列出真正决定结果的命令，读者会拿它对照自己的请求。单元套件在 `verified`、端到端套件在 `notCovered`，是一份附了免责声明的未验证交付物。`notCovered` 留给*无法*检查的事——没有测试、环境缺工具、检查需要只有用户才有的东西——绝不留给“存在但因为慢被跳过”的检查。请求隐含的最强检查存在却没跑，这次运行就没有完成：跑它，或者在 `conclusion` 里说明工作未验证及原因（§5）。
 
-**Gate at the task's scale.** `verified` names the commands that actually decided the
-result, and the reader holds them against what they asked for. A unit suite in `verified`
-and the end-to-end suite in `notCovered` is an unverified deliverable with a disclosure
-attached. `notCovered` is for what *could not* be checked — no test exists, the environment
-lacks the tool, the check needs something only the user has — never for a check that exists
-and was skipped because it is slow. If the strongest check the request implies exists and
-did not run, the run is not done: run it, or say in `conclusion` that the work is unverified
-and why (§5).
+**靠 report 保底。** `report(...)` 不是 `log`：上报的条目在运行失败时也会随完成通知送达，所以一个在第十二项上挂掉的运行，能保住前十一项的工作。每条发现一落地就上报——确认之后、带上状态——不要攒数组最后返回：数组正是你会在失败中丢掉的东西。条目有记录，恢复后的运行不会重复显示。
 
-**Salvage by report.** `report(...)` is not `log`: reported items are delivered with the
-completion notification **even when the run fails**, which is how a run that dies on its
-twelfth task keeps eleven tasks' worth of work. Report each finding the moment it lands —
-after its confirmation, with its status — rather than accumulating an array to return at the
-end: the array is what you lose. Items are recorded, so a resumed run never shows one twice.
-
-**Deliver a report.** The script's final `return` is the handoff the main agent presents,
-in the order below; what the user themselves keep is the artifact of the next section.
-Return this shape (copy the interfaces; they compile as-is) rather than a bare array:
+**交付报告。** 脚本最终的 `return` 是主代理用来转述的交接件（用了 artifact 的另说，见下一节）；用户自己留下来的是下一节的产物。返回下面这个形状（接口原样复制即可编译），不要返回裸数组：
 
 <!-- compile -->
 ```ts
 interface Finding {
-  /** Workspace-relative path, with a line when it applies: "src/a.ts:42". */
+  /** 工作区相对路径，能定位到行就带上："src/a.ts:42"。 */
   where: string;
-  /** One sentence: what is wrong, or what was found. */
+  /** 一句话：哪里错了，或发现了什么。 */
   what: string;
-  /** What showed it: the lines read, or the command and the output that proved it. */
+  /** 证据：读过的行，或证明它的命令与输出。 */
   evidence: string;
-  /** "verified" when an independent subagent or a deterministic check confirmed it; "unconfirmed" when confirmation failed or was not attempted. */
+  /** 独立子代理或确定性检查确认过写 "verified"；确认失败或未尝试写 "unconfirmed"。 */
   status: "verified" | "unconfirmed";
-  /** How much it matters. Reserve "high" for data loss, a crash, or a wrong result. */
+  /** 影响程度。"high" 只留给数据丢失、崩溃或错误结果。 */
   severity: "low" | "medium" | "high";
 }
 interface WorkflowReport {
-  /** Two or three sentences answering what the user asked for. */
+  /** 两三句话回答用户问的事。 */
   conclusion: string;
   findings: Finding[];
-  /** What the run checked and how: the commands it ran, the files it covered. */
+  /** 这次运行检查了什么、怎么检查的：跑过的命令、覆盖的文件。 */
   verified: string[];
-  /** What the run did not look at or could not check, and why. */
+  /** 这次运行没看或无法检查的内容，以及原因。 */
   notCovered: string[];
 }
 
 const result: WorkflowReport = {
-  conclusion: "Nothing was reviewed: this snippet only shows the shape.",
+  conclusion: "没有评审任何东西：这段片段只展示形状。",
   findings: [],
   verified: [],
-  notCovered: ["everything — no subagent ran"],
+  notCovered: ["一切——没有子代理运行"],
 };
 return result;
 ```
 
-Each field has a reader. `conclusion` is the answer to what the user asked. `findings` carry
-their evidence and their status, so the user can tell what was seen from what was suspected.
-`verified` says what this run actually checked and how — the commands it ran, the files it
-covered. `notCovered` says what it did not look at and why, which is the difference between
-"we found nothing" and "we looked nowhere". Write all four in the language the user is
-speaking in this session.
+每个字段都有读者。`conclusion` 是对用户所问的回答。`findings` 带着证据和状态，用户能分清“看到过”和“怀疑”。`verified` 说明这次运行实际检查了什么、怎么检查的——跑过的命令、覆盖的文件。`notCovered` 说明没看什么以及为什么，这是“我们什么都没发现”和“我们哪儿都没看”的区别。四个字段都用本会话用户使用的语言写。
 
-**A return is a digest, not a transcript.** Command output the script captured stays in the
-run's journal; the main agent that needs the raw bytes re-reads them on demand (a re-run,
-the log). Echoing multi-kilobyte tails of stdout into the return lands them in the main
-conversation's context — re-billed at the main model's rate on every later turn — which is
-exactly the pollution the workflow was asked to absorb. Return the parsed numbers, the
-verdicts, and at most the few lines a decision turns on; point at files for the rest.
+**return 是摘要，不是转写。** 脚本捕获的命令输出留在运行的日志里；需要原始字节的主代理按需重读（再跑一次、或看日志）。把几 KB 的 stdout 尾巴放进 return，会原样落进主对话上下文——之后每一轮都按主模型的费率重新计费——这正是工作流本该吸收的污染。返回解析后的数字、判定，以及决策所系的那几行；其余给文件路径。
 
-**Deliver artifacts.** The `return` is read by the main agent, which retells it. `artifact.*`
-is the other channel: things the *user* opens, shown as cards beside the run while it is
-still going and kept after it ends. Two habits:
+**交付产物。** `return` 由主代理读、由它转述。`artifact.*` 是另一个通道：用户*自己打开*的东西，以卡片形式显示在运行旁边，运行结束仍然保留。两个习惯：
 
-- **Every run publishes its deliverable.** When the user asked for a thing — a webpage, a PDF
-  — a subagent writes it into the workspace and returns the path ("write it to `out/…` and
-  return the path" belongs in the ask), and the script publishes it with `artifact.file`;
-  until it does, nothing the run left in the workspace exists for the user. When the user
-  asked for an answer — findings, a review — the `return` is the compact handoff and the
-  deliverable is the long form of the same facts: markdown built from the values the return
-  is built from, published once, at the end. The exception is a run whose whole answer is a
-  line. With more than one artifact, mark the deliverable `{ primary: true }`: the completion
-  card, the run pane and the notification lead with it. One primary per run.
-- **A dashboard is for the person watching the run.** Declare one when the run has state worth
-  watching while it runs — the key number after each round, which items are done or failed:
-  metrics or a chart for a number, a table or board for items with a status. Declare it once
-  at the top, then tag the items you already report: `report(item, "perf")`. It is a
-  projection of that stream, so it grows live and survives a resume. A run that is over
-  before anyone would look needs none.
+- **每次运行都发布它的交付物。** 用户要的是一个东西——网页、PDF——就由子代理把它写进工作区并返回路径（“写到 `out/…` 并返回路径”要写在 ask 里），脚本用 `artifact.file` 发布；在发布之前，运行留在工作区里的任何东西对用户都不存在。用户要的是一个答案——发现、评审——`return` 就是紧凑的交接件，交付物是同样事实的长文版：用 return 所依据的值拼出来，最后发布一次。例外是整个答案只有一行的运行。发布多个产物时，把交付物标成 `{ primary: true }`：完成卡、运行面板和通知都以它为首。每次运行只有一个 primary。
+- **看板是给盯着运行的人用的。** 运行期间有值得看的状态时声明一个——每轮之后的关键数字、哪些项完成或失败：数字用图表或指标，带状态的项用表格或看板。在顶部声明一次，然后给已经在上报的条目打标：`report(item, "perf")`。它是那条流的投影，会实时增长并在恢复后保留。没人会看的运行不需要看板。
 
-**Show what matters.** Two tests decide what earns a card: would the user open it on its
-own (else it is a section of the deliverable), and does it repeat another artifact (a CSV and
-a table of its rows, a report and a copy of it — one of each pair is noise). The common run
-publishes one deliverable, one dashboard when there is something to watch, and further files
-only when a subagent produced something else a person opens.
+**只放重要的东西。** 两张卡片测试：用户会不会自己打开它（否则它是交付物里的一节）；它是否重复另一个产物（一份 CSV 和它行的表格、一份报告和它的副本——一对里只有一个是信息，另一个是噪音）。常见运行发布一个交付物、一个有东西可看时配的看板，以及子代理产出的人会打开的其他文件。**id 和 report 标签是编译期字面量**：一次运行能发布什么在用户批准脚本时就固定了，运行期拼出来的 id 是编译诊断。同一个 id 再次发布会铸出下一版并保留旧版。
 
-Ids and the report tag are compile-time string literals: what a run can publish is fixed
-when the user approves the script, and an id assembled at runtime is a compile diagnostic.
-Publishing an id a second time mints the next version and keeps the old one.
-
-**A rejected publish is a repair opportunity, not an error to swallow.** Content publishes
-reject catchably — the file is missing, the path escaped the workspace, the bytes are over the
-cap — and the honest response is to hand the gap back to a subagent and publish again, rather
-than let a run end with nothing the user can open:
+**发布被拒是修复机会，不是吞掉的错误。** 内容发布会可捕获地拒绝——文件不存在、路径逃出工作区、字节超过上限——诚实的反应是把缺口交回子代理、然后再发布一次，而不是让运行结束时用户什么都打不开：
 
 <!-- compile -->
 ```ts
 interface RoundOutcome {
-  /** 1-based round number. */
+  /** 从 1 开始的轮次号。 */
   round: number;
-  /** Query latency in milliseconds, measured after this round's change. */
+  /** 本轮修改后测得的查询延迟（毫秒）。 */
   queryMs: number;
-  /** One sentence: what this round changed. */
+  /** 一句话：本轮改了什么。 */
   change: string;
 }
 
 const TARGET_MS = 20;
 artifact.chart("perf", {
-  title: "Query latency by round",
-  x: { field: "round", label: "Round" },
-  y: { field: "queryMs", label: "ms" },
+  title: "每轮查询延迟",
+  x: { field: "round", label: "轮次" },
+  y: { field: "queryMs", label: "毫秒" },
   baseline: { field: "target" },
 });
 
-phase("Optimize until the bench meets its target");
+phase("优化到基准达标");
 const optimizer = agent("optimizer", {
   system:
-    "You speed up a JSONL query engine: change one thing, measure it, and write the profile " +
-    "of the query path to out/profile.html.",
+    "你负责加速一个 JSONL 查询引擎：一次只改一件事、测量、并把查询路径的剖析写到 out/profile.html。",
 });
 const rounds: RoundOutcome[] = [];
 for (let round = 1; round <= 3; round += 1) {
   const outcome = await optimizer.ask<RoundOutcome>(
-    `Round ${round}: make the query faster, then measure it.`,
+    `第 ${round} 轮：让查询更快，然后测量。`,
   );
   rounds.push(outcome);
   report({ ...outcome, target: TARGET_MS }, "perf");
   if (outcome.queryMs <= TARGET_MS) break;
 }
 
-phase("Hand the user the profile and the write-up");
+phase("把剖析和说明交给用户");
 try {
-  await artifact.file("profile", "out/profile.html", { title: "Query profile after the last round" });
+  await artifact.file("profile", "out/profile.html", { title: "最后一轮后的查询剖析" });
 } catch {
   const profiler = agent("profiler");
-  await profiler.ask("out/profile.html is missing. Profile the query path as it stands and write the profile there.");
-  await artifact.file("profile", "out/profile.html", { title: "Query profile after the last round" });
+  await profiler.ask("out/profile.html 不存在。对当前查询路径做剖析并把剖析写到这个文件。");
+  await artifact.file("profile", "out/profile.html", { title: "最后一轮后的查询剖析" });
 }
 const latest = rounds[rounds.length - 1]?.queryMs ?? 0;
 await artifact.markdown(
   "report",
   [
-    `# Query latency: ${latest}ms against a ${TARGET_MS}ms target`,
+    `# 查询延迟：${latest}ms（目标 ${TARGET_MS}ms）`,
     "",
-    ...rounds.map((r) => `- Round ${r.round}: ${r.queryMs}ms — ${r.change}`),
+    ...rounds.map((r) => `- 第 ${r.round} 轮：${r.queryMs}ms — ${r.change}`),
   ].join("\n"),
   {
-    title: "Optimization report",
-    description: `What each of the ${rounds.length} rounds changed and what it bought.`,
+    title: "优化报告",
+    description: `${rounds.length} 轮各改了什么、换来了什么。`,
     primary: true,
   },
 );
 
 return {
-  conclusion: `Latency landed at ${latest}ms against a ${TARGET_MS}ms target.`,
-  verified: ["each round's latency was measured by the subagent that made the change"],
-  notCovered: ["memory use; only query latency was measured"],
+  conclusion: `延迟落在 ${latest}ms，目标 ${TARGET_MS}ms。`,
+  verified: ["每轮延迟由做改动的子代理测量"],
+  notCovered: ["内存占用；只测了查询延迟"],
 };
 ```
 
-One `report` call feeds both surfaces: the tagged item lands on the chart *and* in the run's
-results. Three cards, none repeating another: the chart is what the user watched, the profile
-is what a person opens, the report is what they keep; the CSV the bench wrote stays in the
-workspace, since its rows are the chart's points.
+一次 `report` 调用同时喂两个面：打了标签的条目落在图表上，也落在运行的结果里。三张卡片互不重复：图表是用户盯着的，剖析是人会打开的，报告是留下来的；基准写的 CSV 留在工作区，因为它的行就是图表的点。
 
-## 11. A complete example
+## 11. 完整示例
 
-The complete review workflow that used to sit here — a reviewer per changed file, triage
-through one shared subagent that is fed as reviews land, a confirmer per kept finding chained
-inside the same callback, one join for the cross-file deduplication — is
-`${ZCODE_SKILL_DIR}/examples.md` §5; §7 and §10 carry its rules. The open-ended form — a
-seed that surveys and ends in a tail hole, grown fill by fill — is `examples.md` #7 (§15).
+原来放在这里的完整评审工作流——每改动文件一个评审员、一个共享子代理在评审落地时逐条分诊、每条保留的发现链进复核员、最后为跨文件去重汇合一次——在 `patterns.md` §5；§7 和 §10 讲它的规则。开放式形态——先勘察、以尾洞结尾、一填一填长出来的版本——见 `examples.md` #7（§15）。
 
-## 12. Anti-patterns
+## 12. 反模式
 
-| What you wrote | What it costs you |
+| 你写的 | 你付出的代价 |
 | --- | --- |
-| One subagent hoisted out of a fan-out for tidiness | The fan-out became a FIFO queue (§2) |
-| One fixed name for every subagent in a fan-out | A literal duplicate fails compile, a computed one kills the run; name per item or stay anonymous (§2) |
-| A fresh subagent each loop round | Round five re-learns what round four knew, at full price (§2) |
-| An unbounded `while` | The run dies on a cap instead of finishing (§2) |
-| Findings accumulated in an array, returned at the end | A failure on the last task loses them all; `report` as you go (§10) |
-| A whole file interpolated into a prompt | Tokens spent on what the subagent's own tools read; pass the path (§4) |
-| A wide `files.grep` with no glob | The call rejects; there is no partial result (§5) |
-| A subagent asked to run the tests and say if they passed | A session paid for what `world.run` decides as code, and a claim it can fake (§5) |
-| A `world.run` command name built at run time | Compile fails: the command is a literal; runtime values go in the args array (§5) |
-| The gate written from habit, or only the unit tests gated | The project named a stronger check; survey its checks, and run the strongest one before `return` (§5) |
-| A workflow submitted to see whether a parse function works | A full run for what `EvalWorkflowSnippet` answers now (§6) |
-| An unguarded `.find()` / `.match()` result or optional property | Compile fails under `strict`; plain `items[i]` needs no guard (§16.3) |
-| `Date.now()` / `Math.random()` / `fetch` / `fs` | Compile fails: a replayable run cannot contain them |
-| An `await` per item in a loop with no ordering need | Serial wall-clock for concurrent work (§7) |
-| A stage that waits for the whole previous stage though it handles items one at a time | Every worker of the second stage waits for the slowest of the first while slots idle; chain per item, or use a channel (§7) |
-| A join with no comment saying what needs every item | On the next revision nobody can tell the barrier from a habit; say why, or pipeline it (§7) |
-| A channel nobody closes | `ChannelDeadlock`; the producing stage closes it in a `finally` (§7) |
-| An `await` between starting the stage futures and joining them | A stage failing while you await another has no listener: an unhandled rejection, not a failed run; start all, then join once (§7) |
-| A shared pool where per-item names were wanted | One changed upstream item misses the cache for the whole pool (§7) |
-| Phases or subagents named after the machinery ("fan-out", "文件评审阶段", "节点3"), or no markers | A graph that says nothing about the work, or thirty cards (§8, §9) |
-| A reviewer asked "is this good?" | It approves; ask what would break it (§3) |
-| A reviewer loop, a final reviewer, a confirmer and a reader on one deliverable | Four sessions re-reading one piece of work; one mechanism, two with a reason (§3) |
-| Findings reported unconfirmed, or a slow existing check put in `notCovered` | The user cannot tell "seen" from "suspected", or verified from skipped (§10) |
-| A confirmer on a finding `world.run` already decided, or the suite run by hunter, confirmer and gate | One check paid three times; the exit code is the confirmation (§10) |
-| A bare array returned, or nothing published | The main agent improvises the handoff and the user keeps nothing; return the report shape and publish the deliverable (§10) |
-| A CSV and a table of its rows, or a dashboard nobody watches | Cards that are noise (§10) |
-| A persona that says only "make the check pass" | Faking is the obedient reading of an impossible gate; tell it to escalate (§14) |
-| A tunable constant interpolated into an ask | Amending it rewrites every such prompt and re-pays everything downstream (§13) |
-| A wrong run left to finish, or stopped and left | `AmendWorkflow` it now, while it runs (§13) |
-| A revised script pasted inline after a diagnostic | Twenty thousand tokens re-streamed to change one line; `Edit` the named file and pass `path` (§13) |
-| A hole for what an `if` or a subagent could decide, or one in a fan-out callback | A run parked on you for nothing; the fan-out case does not compile (§15) |
-| A subagent paid to extract numbers from output the script could `JSON.parse` | A full session at its reasoning default for what three lines of code decide at zero tokens (§5) |
-| Kilobytes of command output echoed back in the run's `return` | The main-context pollution the workflow existed to prevent, re-imported and re-billed every later turn (§10) |
-| Several one-command runs where one batched run would do | Per-run overhead and a script per fragment, for work one script held |
+| 为整洁把一个子代理提到扇出循环外 | 扇出变成了先进先出队列（§2） |
+| 扇出里所有子代理用一个固定名字 | 字面量重复编译失败，运行期拼出来的名字直接让运行失败；按项命名或匿名（§2） |
+| 每个循环轮次都新开子代理 | 第五轮要把第四轮知道的事重新学一遍，全价（§2） |
+| 没有上限的 `while` | 运行撞上上限死掉，而不是完成（§2） |
+| 把发现在数组里攒着，最后返回 | 最后一项失败就全丢；用 `report` 边发现边报（§10） |
+| 把整个文件插值进提示 | 为子代理自己的工具能读的内容花 token；传路径（§4） |
+| 没有 glob 的宽 `files.grep` | 调用直接拒绝；没有部分结果（§5） |
+| 让子代理跑测试、再说它过没过 | 为一个 `world.run` 就能判定的事付一个会话，而且拿到一个可以被伪造的说法（§5） |
+| 运行期拼出来的 `world.run` 命令名 | 编译失败：命令名是字面量，运行期值放进 args 数组（§5） |
+| 凭习惯写门禁，或只挂单元测试 | 项目点名的更强检查没跑；先勘察再做，最强的那档在 `return` 前真跑一次（§5） |
+| 提交一个工作流来“看看这个解析函数行不行” | 一次完整运行换 `EvalWorkflowSnippet` 现在就能给的答案（§6） |
+| 没有守卫的 `.find()`/`.match()` 结果或可选属性 | `strict` 下编译失败；`items[i]` 不需要守卫，`.find()` 需要（§16.3） |
+| `Date.now()`/`Math.random()`/`fetch`/`fs` | 编译失败：可重放的运行不能包含它们（§16.3） |
+| 无顺序需求却逐项 `await` | 并发工作跑成串行墙钟（§7） |
+| 下一阶段明明逐项接手，阶段却等完上一阶段全部 | 第二阶段的每个 worker 都在等第一阶段最慢的那个，槽位空转；逐项链起来，或用通道（§7） |
+| 没有注释说明为什么需要全部项目的汇合 | 下次修订时没人分得清栅栏和习惯；说清理由，或者流水线化（§7） |
+| 没人关闭的通道 | `ChannelDeadlock`；生产阶段在 `finally` 里关（§7） |
+| 启动阶段 future 与汇合之间有 `await` | 你 await 某个阶段时另一个阶段失败没有监听者：未处理的 rejection，而不是失败的运行（§7） |
+| 该逐项命名的地方用了共享池 | 一个上游项目改动就让整个池的缓存失效（§7） |
+| 用机器词命名阶段或子代理（“扇出”“文件评审阶段”“节点3”），或干脆没有标记 | 一张什么都不说的图，或三十张卡片（§8、§9） |
+| 问评审员“这好吗？” | 它会批准；要问什么会弄坏它（§3） |
+| 一个交付物同时配评审循环、终审、复核员和读者 | 四个会话重读同一份工作；一种机制，最多两种并说明理由（§3） |
+| 发现没标 `unconfirmed` 就上报，或把存在但很慢的检查放进 `notCovered` | 用户分不清“看到过”和“怀疑”，也分不清已验证和已跳过（§10） |
+| 对一个 `world.run` 已判定的发现再派复核员，或猎手、复核员、门禁各跑一遍套件 | 一个检查付三次钱；退出码就是确认（§10） |
+| 返回裸数组，或什么都不发布 | 主代理即兴发挥交接件，用户什么都留不下；返回报告形状并发布交付物（§10） |
+| 一份 CSV 和它行的表格，或没人看的看板 | 噪音卡片（§10） |
+| 只写“让检查通过”的角色设定 | 通不过时必须造假才是顺从的读法；告诉它升级（§14） |
+| 把可调常量插值进 ask | 修订它会重写每一条这样的提示，并让下游全部重付费（§13） |
+| 跑错的运行放着跑完，或停掉不管 | 现在就 `AmendWorkflow`，趁它还在跑（§13） |
+| 诊断之后把修订过的脚本整段重贴 | 为了改一行重流两万 token；`Edit` 那个文件，用 `path` 提交（§13） |
+| 为 `if` 或子代理能决定的事留洞，或在扇出回调里留洞 | 运行白白停在你这里；扇出里那种干脆编译不过（§15） |
+| 让子代理从脚本本来能 `JSON.parse` 的输出里抄数字 | 一个默认推理档的完整会话，换三行代码零 token 就能决定的事（§5） |
+| 在 run 的 `return` 里回吐几 KB 命令输出 | 工作流本来要防的主上下文污染，被重新导入，并在之后每轮重新计费（§10） |
+| 几个单命令小运行，本可以合并成一个 | 每份片段一份运行固定开销、一份脚本维护（§12） |
 
-## 13. After you submit
+## 13. 提交之后
 
-Compilation happens first. **Diagnostics mean nothing ran**, and they name the file your
-script is in: an inline `script` is written under `.zcode/workflow-drafts/` before it is
-compiled and the response hands you the path; a `path` submission is that file already. Each
-diagnostic reads `{path}:L{line}:C{column} {message}`, counted in the file.
-**Edit that file and resubmit with `path`. Do not paste the script inline again**: the
-`Edit` costs a few lines; the re-stream costs twenty thousand tokens and may stall the
-provider. (If the response names no file, resubmit inline.)
+编译先发生。**诊断意味着什么都没跑**，诊断会指出脚本所在文件：内联 `script` 在编译前写到 `.zcode/workflow-drafts/` 下，结果给出路径；`path` 提交的文件就是那个路径。每条诊断读作 `{path}:L{line}:C{column} {message}`，行列表按文件计。**改那个文件，用 `path` 重新提交。不要再次内联粘贴**：`Edit` 只花几行，重流要两万 token，还可能把 provider 卡住。（如果结果没给文件名，再内联提交。）
 
-On a clean compile the run starts in the background and you get a run ID. **Do not poll it.**
-The completion notification arrives on its own with the final return value and every
-reported item. Do other work, unless the user asked you to wait.
+编译干净后，运行在后台启动，你会拿到 run ID。**不要轮询它。** 完成通知会带着最终 return 值及所有上报条目自己到达。去干别的，除非用户要求你等。
 
-When you genuinely need to look at a run:
+真正需要看一个运行时：
 
-- `TaskOutput` blocks until a run *this session started* finishes: the waiting tool.
-- `GetWorkflowRun` is an instant snapshot; use it when you must not block, or for a run
-  another session owns, which `TaskOutput` cannot see.
-- `ListWorkflowRuns` enumerates the project's runs, including other sessions'.
+- `TaskOutput` 阻塞到*本会话启动的*运行结束：这是等待工具。
+- `GetWorkflowRun` 是即时快照；不能阻塞时用它，或看别的会话拥有的运行（`TaskOutput` 看不到）。
+- `ListWorkflowRuns` 枚举本项目的运行，包括其他会话的。
 
-Read the terminal state precisely. A run ends in exactly one of three states:
+准确读终态。运行只结束于三种状态：
 
-- **completed** — the script returned.
-- **errored** — the script itself failed (an uncaught throw, a cap it overran, an artifact
-  whose source file was missing). Replaying it would fail the same way, so
-  `ResumeWorkflowRun` refuses it; edit the run's script file, which the notification names,
-  and resubmit it with `AmendWorkflow` and `path`.
-- **stopped** — resumable as-is with `ResumeWorkflowRun`. The `<stop-reason>` says why:
-  `user` (leave it alone unless they ask), `model` (you stopped it), `interrupted` (the
-  owning process exited; resume it), or `provider` (a deterministic model-side error —
-  sign-in expired, quota cap; the `<error>` block names the fix — resolve it with the user,
-  then resume). A fifth state, `superseded`, is a run you amended away: not resumable, no
-  notification.
+- **completed**——脚本返回了。
+- **errored**——脚本自己失败了（未捕获的 throw、超了某个上限、产物源文件缺失）。重放会同样失败，所以 `ResumeWorkflowRun` 拒绝它；编辑通知里点名的运行脚本文件，用 `AmendWorkflow` 加 `path` 重新提交。
+- **stopped**——可以原样恢复，用 `ResumeWorkflowRun`。`<stop-reason>` 说明原因：`user`（除非用户要求，否则别动）、`model`（你停的）、`interrupted`（拥有进程退出；恢复它）、`provider`（确定性的模型侧错误——登录过期、配额上限；`<error>` 块说明修法——和用户一起解决，然后恢复）。第五种状态 `superseded` 是你 amend 掉的运行：不可恢复，也不会通知。
 
-Reported items come back on errored and stopped runs too. A run with a "waiting for
-provider" badge is retrying a provider error (§16.3), not broken; after twenty minutes you
-get one stall notification, and it still needs nothing from you.
+已报告的条目在 errored 和 stopped 运行上也会回来。带“waiting for provider”徽章的运行是在重试 provider 错误（§16.3），不是坏了；二十分钟后会收到一次停滞通知，仍然不需要你做任何事。
 
-**When the script itself was wrong, do not start over.** Any run — errored, stopped,
-completed, or still running — can be superseded: edit the run's script file and call
-`AmendWorkflow` with `run_id` and that `path`. The new run imports the old one's finished
-work, matched per named subagent along its sequence of asks, so every step you did not touch
-settles from cache and only the changed part runs (the boundary is in §16.4). This is the
-move after a `ScriptError`, a bad prompt, or a completed analysis that needs one more stage.
-Two things make the cache hit: names that stay the same, and asks whose instructions stay
-byte-identical (an upstream change cascades downstream).
+**脚本本身写错时，不要从头开始。** 任何运行——errored、stopped、completed 或仍在跑——都可以被 supersede：编辑运行的脚本文件，用 `AmendWorkflow` 传 `run_id` 和那个 `path`。新运行会导入旧运行已完成的工作，按命名子代理匹配其 ask 序列，所以每个没动过的步骤都从缓存以零成本落地，只有改动的部分真的跑（边界见 §16.4）。这是 `ScriptError`、坏提示、或完成后需要再加一个阶段之后的动作。两个条件让缓存命中：名字保持不变，且 ask 指令逐字节不变（上游改动会级联下游）。
 
-**Every run remembers its script file, so a revision is an `Edit`.** The terminal
-notification names that path and `GetWorkflowRun` reports it as `scriptPath`, so the script
-never has to live in your context: compaction may have dropped the text you sent, the file
-on disk has not moved. Edit it in place and pass `path`; pass `script` only for something
-genuinely new. A `path` whose bytes still equal what the run ran is refused as
-`script_unchanged` — your `Edit` did not land — with nothing stopped and nothing created.
+**每次运行都记得自己的脚本文件，所以修订就是一次 `Edit`。** 终态通知给出该路径，`GetWorkflowRun` 以 `scriptPath` 报告它，所以脚本从不需要住在你的上下文里：压缩可能已经丢掉了你发出的文本，磁盘上的文件没有动。原地编辑并用 `path` 提交；只有真正全新的脚本才用 `script`。`path` 的字节仍等于该运行跑过的内容时会被拒绝为 `script_unchanged`——你的 `Edit` 没落地——什么都不会停、也不会创建。
 
-**Editing a draft asks nothing.** `.zcode/workflow-drafts/` is machine-owned and
-git-ignored, so an `Edit` under it opens no confirmation window; the window still stands
-between the file and the run, so fix the file freely and let the submission be what the
-user answers.
+**编辑草稿不问任何问题。** `.zcode/workflow-drafts/` 是机器所有、被 git 忽略，所以在那下面 `Edit` 不会打开确认窗口；窗口仍然挡在文件和运行之间，所以放心改文件，只把提交交给用户回答。
 
-**Repair a run while it is still going.** The same call works before the run ends, and the
-earlier the cheaper. When a run is heading the wrong way, do not wait for it and do not stop
-it first: call `AmendWorkflow` on it. The tool stops the predecessor, waits for it to settle,
-imports everything that settled before the stop at zero cost, and starts the revision — one
-call, no `TaskStop`, no polling. The old run shows as "superseded" and sends no notification;
-the result you get back names both runs.
+**运行还在跑时修复它。** 同一个调用在运行结束前也有效，越早越便宜。运行正朝错误方向走时，别等它、也别先停它：对它的 run_id 调 `AmendWorkflow`。工具会停掉前任、等它落定、以零成本导入停止前已落定的一切，并启动修订——一次调用，不用 `TaskStop`，不用轮询。旧运行显示为“superseded”，自己不通知；新运行落定时通知。别等它，也别用 `TaskOutput` 轮询它。
 
-The cascade rule has a converse that decides whether revisions are cheap or ruinous.
-Interpolating an upstream **result** into a prompt is safe: on resume it replays
-byte-identical, so the prompt does too. Interpolating a script **constant** is the opposite
-bet — constants are what an amendment tunes, and every ask whose text mentions one forfeits
-its cache when you tune it, plus everything downstream:
+级联规则有一个推论，决定修订是便宜还是灾难。***上游结果***插值进提示是安全的：恢复时它逐字节重放，提示也逐字节不变。插值脚本**常量**是相反的下注——常量正是修订会调的东西，每条提到它的 ask 都会在调整时失去缓存，连同下游一切：
 
 ```ts
-// ✗ Amending PASS_THRESHOLD (say 96 → 94) rewrites this text, so the resumed run
-//   misses cache at the first revision and re-pays every ask after it.
+// ✗ 修订 PASS_THRESHOLD（比如 96 → 94）会重写这段文字，恢复时第一次修订就丢缓存，
+//   并让它之后的每条 ask 重新付费。
 draft = await writer.ask<Draft>(
-  `Scored ${review.score}; passing needs ${PASS_THRESHOLD}. Revise: ${JSON.stringify(review.comments)}`,
+  `得分 ${review.score}；通过需要 ${PASS_THRESHOLD}。修改：${JSON.stringify(review.comments)}`,
 );
 
-// ✓ Only replayed upstream values and the fact that the branch was taken; amending
-//   the threshold now moves only where the loop exits, and earlier rounds settle from cache.
+// ✓ 只重放上游值和“分支被走到”这个事实；现在调阈值只移动循环出口，
+//   更早的轮次从缓存落定。
 draft = await writer.ask<Draft>(
-  `The review did not pass. Address each comment: ${JSON.stringify(review.comments)}`,
+  `评审未通过。逐条处理意见：${JSON.stringify(review.comments)}`,
 );
 ```
 
-Keep the tunable knobs — thresholds, round caps — in the script's control flow, where
-amending them is free, and out of ask text, where it is a cache purge. A subagent rarely
-needs the number; it needs the verdict and the feedback.
+把可调旋钮——阈值、轮次上限——留在脚本控制流里，修订它们免费；不要放进 ask 文本，那里是缓存清除。
 
-## 14. When a subagent escalates
+## 14. 子代理升级提问时
 
-Every subagent can escalate a blocking question to you while the run is going; nothing in
-the script switches this on. It exists for the one thing a script cannot design around: a
-subagent walled in by something not its fault — a gate it cannot pass (capped at 95 against
-a threshold of 96), two instructions no single output satisfies, a fact only whoever started
-the run knows. With no way to ask, it has two moves left, both bad: grind until the round
-cap, or fake its way past.
+每个子代理都能在运行中向你升级一个阻塞问题；脚本里没有任何开关。它存在的理由是脚本无法设计的那一件事：一个子代理被不是自己的错困住——一道它过不去的门禁（上限 95 对阈值 96）、两条无法用单一输出同时满足的指令、只有启动运行的人才知道的事实。没有发问的途径，它剩两个动作，都坏：磨到轮次上限，或者编过去。
 
-**What reaches you.** A notification arrives mid-run carrying the run, the subagent, the
-question with whatever evidence the subagent attached, and a globally unique question id shaped
-like `dwfq-...`. Only the subagent that asked is parked, and only on that one call: its
-siblings, the script's control flow and the run's status all carry on unchanged. Nothing
-times out on its behalf either — it waits until you answer or until the run is cancelled. So
-you need not drop what you are doing, but you cannot leave it unanswered.
+**到达你这里的是什么。** 一条运行中的通知，带运行、子代理、问题及子代理附上的任何证据，以及全局唯一的问题 id（形如 `dwfq-...`）。只有提问的子代理被挂起，且只挂那一个调用：它的兄弟、脚本控制流和运行状态都照常继续。它那边也没有超时——它会一直等到你回答或运行被取消。所以不必放下手头的事，但也不能不回答。
 
-**Then decide which of two things is true.**
+**然后判断两件事里哪件为真。**
 
-- The question **has an answer** — a clarification, one missing fact, a tradeoff only you can
-  call. Answer it with `ResolveWorkflowQuestion` and that `question_id`. Your text becomes
-  the result of the subagent's own call, verbatim, and it continues its turn from there. Not
-  sure? Read the run with `GetWorkflowRun`, or put the question to the user with
-  `AskUserQuestion` — then come back and answer, because nothing answers in your place.
-- The **script** is what is broken — a gate no output can pass, control flow routing work to
-  the wrong subagent. No sentence fixes that. Edit the run's script file and call
-  `AmendWorkflow` on it with that `path` (§13); it stops the run for you. The escalation is
-  what makes that amendment cheap: the ask that escalated never settled, so it sits exactly
-  past the cache boundary — everything before it imports from the old run at no token cost,
-  and it re-runs against the fixed script.
+- 问题**有答案**——澄清、一个缺失的事实、只有你能定的取舍。用 `ResolveWorkflowQuestion` 带上 `question_id` 回答，你的文本逐字成为子代理调用的结果，它从那里继续。不确定？先用 `GetWorkflowRun` 读运行，或用 `AskUserQuestion` 问用户——然后回来回答，没有人替你回答。
+- **脚本**坏了——没有输出能通过的门禁、控制流把活路由给错误的子代理。一句话修不了。编辑运行的脚本文件，用 `path` 调 `AmendWorkflow`（§13）；它会替你停掉运行。升级让这次修订便宜：升级的 ask 从未落定，所以它正好坐在缓存边界之后——之前的一切从旧运行零 token 导入，它按修好的脚本重跑。
 
-**If the notification never arrives**, `GetWorkflowRun` lists what a run still owes you:
-the questions under `pendingQuestions`, ids included, and the holes it is waiting at (§15).
-That snapshot is the way to check on a run you suspect is waiting on you.
+**如果通知一直没来**，`GetWorkflowRun` 会列出运行还欠你什么：`pendingQuestions` 下的问题（含 id），以及它停在的洞（§15）。对一个怀疑在等你的运行，这个快照就是检查方式。
 
-**Write personas that make honesty the cheap move.** A persona that says "make the check
-pass" and stops there leaves faking a pass as the obedient reading. One sentence closes that
-off: *"If a check is impossible to pass, or your instructions contradict each other, escalate
-and say so plainly rather than working around it."*
+**写让人容易诚实的角色设定。** 只写“让检查通过”就停笔的角色，留下“造假”作为唯一顺从的读法。一句话堵死它：*“如果检查无法通过，或指令自相矛盾，升级并如实说明，而不是绕过。”* 一个 ask 允许三次升级；第四次以普通结果返回，告诉子代理按自己最好的判断继续——这是防闲聊的闸。
 
-One ask gets three escalations; the fourth comes back as an ordinary result telling the
-subagent to proceed on its own best judgement — a guard against chatter.
+## 15. 洞：让运行中的发现来写工作流
 
-## 15. Holes: growing the workflow as the run learns
+`hole<T>()` 是另一种运行中请求——§14 是子代理的，这个是你的。脚本是你确定知道的部分；洞是你知道停在哪里。任何阶段的子代理、ask 或门禁你只能靠猜的，就是一个洞：写洞之前的部分，以 `hole<T>()` 结尾，让运行的发现写剩下的。请求已经固定了形状的工作流没有洞，这也很好。
 
-`hole<T>()` is the other mid-run request — §14 is the subagent's, this one is yours. A
-script is what you know for sure; a hole is where knowing stops. Any phase whose subagents,
-asks or gate you would have to guess is a hole: write the part before the guess, end it in
-`hole<T>()`, and the run's findings write the rest. A workflow whose shape the request fixes
-has no holes, and that is fine too.
+子代理返回**值**；洞返回**代码**。当脚本已经知道拿答案做什么、只缺数据时，用子代理 ask。当缺的是工作流其余部分——接下来哪些阶段、哪些子代理存在、每个被告知什么、跑什么门禁——留洞。*如果你现在就能写出代码、只缺数据，那就不是洞。*
 
-A subagent returns a **value**; a hole returns **code**. Ask a subagent when the script
-already knows what to do with the answer and only the data is missing. Leave a hole when
-what is missing is the rest of the workflow — which phases come next, which subagents exist,
-what each is told, what gate runs. *If you could write the code now and only the data is
-missing, it is not a hole.*
-
-| The unknown is… | Use |
+| 未知的是…… | 用什么 |
 | --- | --- |
-| an answer the script knows how to consume | a subagent ask; fresh eyes if it is a judgment (§3) |
-| a branch among outcomes you can enumerate now | a typed result and an `if` or a loop, in the script |
-| what the remaining workflow should be, knowable only from findings | a hole |
-| a question a subagent hits mid-task that only the run's owner can answer | escalation (§14) |
+| 脚本知道怎么消费的答案 | 子代理 ask；涉及判断时配新眼睛（§3） |
+| 你此刻能枚举出来的分支 | 类型化结果加 `if` 或循环，写在脚本里 |
+| 接下来工作流该是什么、只有发现才能告诉你 | 洞 |
+| 子代理做到一半、只有运行的主人能回答的问题 | 升级（§14） |
 
-Subagents run without you, in parallel; a hole parks one branch until you take a turn. Spend
-holes on shape, never on answers.
+子代理在你之外并行运行；洞把一条分支停到你出手。洞只花在形状上，绝不花在答案上。
 
-Three forms; `T` is always written out:
+三种形式；`T` 永远写完整：
 
 ```ts
-const plan = await hole<Plan>("决定分组", `最慢的模块是 ${survey.slowest}`); // decide, then continue
-return await hole<Guide>("第1步：决定导览结构", `盘点：${JSON.stringify(survey)}`); // tail: the rest is not written yet
-const plan = await hole<Plan>("决定分组", `…`, async () => { /* filled: the body stands in for the hole */ });
+const plan = await hole<Plan>("决定分组", `最慢的模块是 ${survey.slowest}`); // 先决定，再继续
+return await hole<Guide>("第1步：决定导览结构", `盘点：${JSON.stringify(survey)}`); // 尾洞：其余还没写
+const plan = await hole<Plan>("决定分组", `…`, async () => { /* 已填：函数体代替洞 */ });
 ```
 
-- **The name is a phase name.** A literal, unique among the script's holes and phase markers
-  (nested fills included), in the user's language: it labels the station, the notification and
-  the fill file. `T` is the contract the body is checked against.
-- **The prompt is the one channel for values.** Interpolate what the decision needs; the
-  fill reads values there and types from the code.
-- **The body sees every binding declared before the hole, none after**, and may leave holes
-  of its own.
-- **Filled once, run per reach.** A hole in a loop or a helper is filled once and its body
-  runs each iteration with that iteration's bindings. Never inside a fan-out callback (`.map`
-  or another array-method body): the fill would be owed while the items already run.
+- **洞名就是阶段名。** 字面量，在脚本所有洞和阶段标记中唯一（嵌套填充也算），用用户的语言：它标注站点、通知和填充文件。`T` 是函数体被检查所对照的契约。
+- **提示是值的唯一通道。** 把决策需要的值插值进去；函数体从那里读值、从代码推类型。
+- **函数体能看到洞之前声明的所有绑定，看不到之后的**，并且可以留自己的洞。
+- **填一次，每次到达都运行。** 循环或 helper 里的洞填一次，函数体每轮以那轮的绑定运行。**绝不要放在扇出回调里**（`.map` 或其他数组方法体）：项目已经跑起来了，填充还欠着。
 
-### Grow by tail holes — the default for a task whose shape is not known upfront
+### 用尾洞生长——形状不预先知晓时的默认做法
 
-When the request does not tell you the workflow — a repository to understand before the
-work can be planned, a bug whose next step depends on what the last one found — do not
-guess the topology. Write the part you know and end the script with a tail hole. The script
-then grows by **nesting**: each fill is the statements of the innermost body, does one step,
-and ends in the next tail hole, until one returns instead.
+当请求没有告诉你工作流长什么样——一个仓库要先摸清才能规划、一个 bug 的下一步取决于上一步发现什么——不要猜拓扑。写你确定知道的部分，以尾洞结束脚本。脚本随后靠**嵌套**生长：每次填充是最内层函数体的语句，做一步，以一个新的尾洞结束，直到某次 `return` 收口。
 
 ```ts
-// 0. The seed you submit: what is known, then a typed gap.
+// 0. 你提交的种子：已知的部分，然后一个有类型的缺口。
 phase("盘点仓库顶层目录");
 const survey = await agent("勘察员").ask<Survey>("列出顶层目录，各用一句话说明作用。");
 return await hole<Guide>("第1步：决定导览结构", `盘点：${JSON.stringify(survey.dirs)}`);
 ```
 
 ```ts
-// 1. After the first fill: the hole has a body — one step, then the next hole.
+// 1. 第一次填充后：洞有了函数体——做一步，然后下一个洞。
 return await hole<Guide>("第1步：决定导览结构", `盘点：…`, async () => {
   phase("分章并行撰写初稿");
   const drafts = await Promise.all(
@@ -969,9 +614,9 @@ return await hole<Guide>("第1步：决定导览结构", `盘点：…`, async (
 ```
 
 ```ts
-// 2. After the second fill: the chain closes with a value, which is the run's result.
+// 2. 第二次填充后：链以值收口，这个值就是运行的结果。
 return await hole<Guide>("第1步：决定导览结构", `盘点：…`, async () => {
-  /* step 1 as above; `survey` and `drafts` are in scope below */
+  /* 第一步同上；下面的 survey 和 drafts 在作用域里 */
   return await hole<Guide>("第2步：审读与交付", `…`, async () => {
     phase("独立审读并修订");
     const critique = await agent("审读员").ask<string>(`只凭文本挑毛病：${JSON.stringify(drafts)}`);
@@ -981,30 +626,20 @@ return await hole<Guide>("第1步：决定导览结构", `盘点：…`, async (
 });
 ```
 
-You send only the innermost statements; the tool splices them in and rewrites the draft
-with the effective script, so the draft you read before the next fill is the script that is
-running. The chain's rules: a fresh name per step (`第N步：<what it does>`; a repeated name
-is a 9012); the prompt is the progress ledger; results stay in bindings (`survey`, `drafts`),
-because every inner body sees the ones around it; a step may add phases, subagents and
-holes of its own. The timeline grows to the right, one head per step. This is the normal
-way to run a task whose shape only appears as the work proceeds, not a fallback.
+你只发最内层的语句；工具把它们拼接进去并重写草稿，所以下一次填充前你读到的草稿就是正在运行的脚本。链的规则：每一步一个新名字（`第N步：<做什么>`；重复名字是 9012）；提示是进度账本；结果留在绑定里（`survey`、`drafts`），因为每个内层函数体都能看到外层的；一个步骤可以加自己的阶段、子代理和洞。时间线向右生长，一步一个头。形状只能在工作中逐渐出现时，这是正常做法，不是兜底。
 
-### A stage shaped by discovery
+### 由发现塑形的阶段
 
-The survey's *value* goes to the script as data; the fill writes the *topology* of the next
-stage, which the survey decided: three reviewers or one, fanned out or sequential, which
-check gates them.
+勘察的*值*作为数据进入脚本；填充写的是下一阶段的*拓扑*，由勘察决定：三个评审员还是一个、扇出还是串行、用什么门禁拦住它们。
 
 ```ts
 const hot = await agent("剖析员").ask<Hotspots>("找出最慢的三个模块，说明各自的耦合。");
 const reviews = await hole<Review[]>("怎么审查这些热点", `热点：${JSON.stringify(hot.modules)}`);
 ```
 
-A fill for two independent modules and one shared one: two reviewers in a `Promise.all`,
-a calibrated reviewer over the shared module, then a bounded fix-and-recheck loop — none of
-it writable before `hot` was known.
+两个独立模块、一个共享模块的填充：两个评审员放进 `Promise.all`、一个校准评审员看共享模块，然后一个有界的修复-复查循环——这些在拿到 `hot` 之前写不出来。
 
-### A procedure decided at first sight, run every round
+### 第一次看见时就决定的规程，之后每轮都跑
 
 ```ts
 for (const failure of failures) {
@@ -1013,11 +648,9 @@ for (const failure of failures) {
 }
 ```
 
-Filled at the first failure, the body runs for every one after with that round's `failure`.
-The fill is a *procedure* — which subagent to send, what to ask, when to mark `unconfirmed`
-— not an answer about one failure; that would be a subagent ask inside the loop.
+在第一个失败处填写，函数体对之后的每一个失败都以那轮的 `failure` 运行。填充是一个*规程*——派哪个子代理、问什么、什么时候标 `unconfirmed`——不是关于某个失败的答案；后者是循环里的子代理 ask。
 
-### A remedy the plan could not enumerate
+### 计划无法枚举的补救
 
 ```ts
 const gate = await world.run("pnpm", ["test"]);
@@ -1026,11 +659,9 @@ if (gate.exitCode !== 0) {
 }
 ```
 
-If the remedies were known, the script would hold a `Remedy` value and an `if`. The hole is
-for when the fix may need phases and subagents nobody planned — a bisect, a second opinion,
-a rollback — decided with the failure in hand.
+如果补救办法已知，脚本里会有 `Remedy` 值和 `if`。洞留给修复可能需要的、没人规划过的阶段和子代理——二分、第二个意见、回滚——拿着失败再做决定。
 
-### Propose, judge, then build
+### 提议、评判，然后建造
 
 ```ts
 const proposals = await Promise.all([1, 2, 3].map((k) => agent(`方案${k}`).ask<Proposal>("提一个方案。")));
@@ -1038,593 +669,375 @@ const pick = await agent("评委").ask<Pick>(`选最好的一个：${JSON.string
 return await hole<Outcome>("按选定方案施工", `选中：${JSON.stringify(proposals[pick.index])}`);
 ```
 
-The judge is a subagent, because choosing is a value; the hole writes the stage that builds
-the winner, whose shape depends on what won.
+评委是子代理，因为选择是一个值；洞写建造获胜方案的那个阶段，而它的形状取决于谁赢了。
 
-**Not a hole:** a verdict, a summary, a choice among options, an answer per item — those are
-subagent asks — and any branch an `if` over a typed result can express.
+**不是洞的：** 判定、总结、选项间取舍、逐项答案——那些是子代理 ask——以及任何 `if` 能基于类型化结果表达的分支。
 
-**Filling one.** The notification carries the run, the hole's site id (`hole#21b40fca`), its name
-and type, the prompt with its values in, the draft's path and the hole's line, and the phases
-before and after. Then:
+**填充一个洞。** 通知带着运行、洞的站点 id（`hole#21b40fca`）、名字和类型、带值的提示、草稿路径和洞的行号，以及前后阶段。然后：1）读草稿洞所在位置附近：函数体在洞的位置编译，能看到上面声明的部分。2）只写语句——不写 `hole(...)` 调用、不写箭头——返回 `T` 的值，或者下一个步骤未知时以新的尾洞结束；固定逻辑先在 `EvalWorkflowSnippet` 里预演（§6）。3）用 `run_id`、`hole_id` 和 `script`（或 `path`，§16.7）调 `FillWorkflowHole`。运行长出函数体继续；响应列出新增阶段和草稿——现在持有有效脚本——供之后的 `AmendWorkflow` 使用。4）诊断意味着什么都没拼进去、洞还在等：编辑响应点名的填充文件，用 `path` 重新提交，不要再粘贴。草稿文件里的一行是运行记录的脚本：用 `AmendWorkflow`，不是编辑草稿。填充如果在运行期抛错，会在站点处拒绝并让运行 errored，除非被捕获；按常规 amend 草稿。完整脚本：`patterns.md` #14–#16、`examples.md` #7。
 
-1. Read the draft around the line: the body is compiled where the hole stands and sees what
-   is declared above it.
-2. Write only the statements — no `hole(...)` call, no arrow — returning a value of `T`, or
-   ending in a new tail hole when the next step is not known yet; rehearse fixed logic in
-   `EvalWorkflowSnippet` first (§6).
-3. Call `FillWorkflowHole` with `run_id`, `hole_id` and `script` (or `path`, §16.7). The run
-   grows by the body and goes on; the response names the phases added and the draft, now
-   holding the effective script, for any later `AmendWorkflow`.
-4. Diagnostics mean nothing was spliced and the hole still waits: edit the fill file the
-   response names and resubmit with `path`, never paste it again (§13). A line in the
-   draft's file is the run's recorded script: `AmendWorkflow`, not a draft edit.
+## 16. 工具参考
 
-A fill that throws at run time rejects at the site and ends the run errored unless caught;
-amend the draft as usual. Full scripts: `patterns.md` #14–#16, `examples.md` #7.
-
-## Going deeper
-
-- `${ZCODE_SKILL_DIR}/patterns.md` — the topology catalogue. Its index puts the pipeline
-  shapes first: per-item chaining, streaming through channels, a feedback loop with a counted
-  close. Then fan-out/fan-in, review sweeps, planner-reviewer loops, judge panels, staged
-  handoffs, bounded discovery, `world.run`-gated verifier loops, model routing, and the hole
-  shapes (growth by tail holes, a stage shaped by discovery, a remedy hole). Read it when you
-  know the shape you want and want it written correctly.
-- `${ZCODE_SKILL_DIR}/examples.md` — complete worked scripts, including a two-subagent
-  adversarial prove/disprove loop and a repository guide grown step by step through tail
-  holes. Read one when you want to see a whole script's arc.
-
-## 16. Tool reference
-
-The five authoring tools — `CreateWorkflow`, `AmendWorkflow`, `FillWorkflowHole`,
-`SaveWorkflow` and `EvalWorkflowSnippet` — carry short descriptions on purpose, and each refuses
-to run until this skill has been loaded in the session. This section is the part of their
-contract that the descriptions do not carry: the facade the compiler checks against, the
-rules a script must satisfy, and the fields each tool takes. Read it before writing or
-revising a script; the compiler holds you to it.
+五件编写工具——`CreateWorkflow`、`AmendWorkflow`、`FillWorkflowHole`、`SaveWorkflow`、`EvalWorkflowSnippet`——的说明刻意写得很短，而且每件都拒绝运行直到本会话加载了本技能。本节是那些说明没有承载的契约部分：编译器检查所对照的 facade、脚本必须满足的规则、每个工具接受的字段。写或修订脚本之前先读它；编译器会照着执行。
 
 ### 16.1 `CreateWorkflow`
 
-Typechecks the script; on a clean compile asks the user to confirm and starts the run in the
-background; you are notified with the script's final `return` value when the run settles.
-Compilation errors come back as diagnostics, counted in the script's file (§13).
+对脚本做类型检查；编译干净后请用户确认，并在后台启动运行；运行落定时用脚本最终 `return` 值通知你。编译错误以诊断形式返回，按脚本文件计数（§13）。
 
-**Three sources; pass exactly one.**
+**三个来源，只传一个。**
 
-- `script`: a one-off workflow written inline. It is saved to a file under
-  `.zcode/workflow-drafts/` and the result names that file, compiled or not; revise it by
-  editing the file and resubmitting with `path` (§13).
-- `saved`: a workflow saved in this project or globally, by name —
-  `saved: { name: "pr-review", args: { pr: "123" } }`; arguments are validated against its
-  declaration before anything runs. Check `ListSavedWorkflows` before writing one from
-  scratch: a saved workflow the user kept beats a rebuilt one. Running a saved workflow
-  is the one call that does not need this skill loaded.
-- `path`: a script file on disk, relative to the working directory or absolute — normally
-  the file a previous result named. Pass `args` alongside it when the file declares
-  arguments in its `/* zcode-workflow` block.
+- `script`：内联写的一次性工作流。保存到 `.zcode/workflow-drafts/` 下的文件，结果给出该路径（无论编译与否）；改文件、用 `path` 重新提交来修订（§13）。
+- `saved`：本项目或全局保存的工作流，按名字——`saved: { name: "pr-review", args: { pr: "123" } }`；参数在运行前按声明校验。从零写之前先查 `ListSavedWorkflows`：用户留下的已保存工作流胜过重建。运行已保存工作流是唯一不需要加载本技能的调用。
+- `path`：磁盘上的脚本文件，相对工作目录或绝对路径——通常是先前结果的路径。文件在 `/* zcode-workflow` 块里声明了参数时，一并传 `args`。
 
-Either way the user confirms the run, and the confirmation shows the actual script.
+无论哪种来源，用户确认运行，确认界面展示实际脚本。
 
-**Fields.**
+**字段。**
 
-- `name`: a short label for the run in the user's language ("PR review", "代码评审").
-  Always pass it for an inline script; it labels the run everywhere and names its draft
-  file. It defaults to the saved workflow's name.
-- `max_concurrency`: an upper bound on how many subagents work at once. Set it only when
-  the user asks to limit parallelism — never as a reaction to provider rate limits or
-  errors, which the runtime already adapts to.
-- `subagent_model`: the model the subagents run on, as `providerId/modelId` or a bare model
-  id (optionally `$reasoningLevel`). Set it only when the user asks for a specific model;
-  pass the name they used, and if the tool cannot resolve it, pick from the ids it lists or
-  `ListModels`. NEVER set a model under another provider the user did not ask for: a bare
-  name resolves only within the session's provider, and crossing to another one is written
-  as the full `providerId/modelId`, which you write only when the user named that model.
-  If you think a cheaper or faster model elsewhere would serve the run, ask the user before
-  calling — model, provider, what it saves — and treat their yes as the request. You stay
-  on the session model either way.
+- `name`：运行标签，用用户的语言（“PR 评审”“代码评审”）。内联脚本总是传；它给运行打标签，也是草稿文件名。缺省用已保存工作流的名字。
+- `max_concurrency`：同时工作的子代理上限。只在用户要求限制并发时设置——绝不要因为 provider 限流或报错而设，运行时会自行适配。
+- `subagent_model`：子代理运行的模型，`providerId/modelId` 或裸模型 id（可选 `$reasoningLevel`）。只在用户点名模型时设置；用用户给的名字，工具无法解析时从它列出的 id 或 `ListModels` 里挑。**绝不要**把子代理放到用户没点名的另一个 provider 的模型上：裸名字只在会话的 provider 内解析，跨 provider 要写全 `providerId/modelId`，而那只在用户点名那个模型时才写。如果你认为别处更便宜/更快的模型会有帮助，调用前先问用户——模型、provider、能省什么——把用户的“是”当作请求。无论如何你自己留在会话模型上。
 
-This tool starts a new run. To change a run that exists — errored, completed, stopped or
-still running — call `AmendWorkflow` (§13, §16.4), never `CreateWorkflow` again.
+这个工具启动新运行。要改动已存在的运行——errored、completed、stopped 或仍在跑——调 `AmendWorkflow`（§13、§16.4），绝不要再次 `CreateWorkflow`。
 
-### 16.2 The facade
+### 16.2 facade
 
-Every script and snippet is checked against these declarations. They are the same constant
-the compiler is fed, so what you read here is what typechecks. The block uses `declare`
-because it is the host's ambient API description — do not imitate it; your script defines
-plain interfaces and never uses `declare`.
+每个脚本和片段都会对照这些声明做检查。它们就是喂给编译器的同一份常量，所以你读到的就是要类型检查的。这个块使用 `declare`，因为它是宿主的 ambient API 描述——不要模仿它；你的脚本定义普通 interface，永远不用 `declare`。
 
 <!-- facade-dts:start -->
 ```ts
-/** The pending result of one ask. Await it, or pass it to Promise.all with others. */
+/** 一次 ask 的待定结果。await 它，或与其他一起传给 Promise.all。 */
 declare interface Node<T> extends PromiseLike<T> {}
 
-/** A model declared with model(). */
+/** 用 model() 声明的模型。 */
 declare class ModelRef { private constructor(); private readonly modelRef: never }
 
 /**
- * Declare a model subagents may run on: "modelId" or "providerId/modelId", optional "$level".
- * String literal only (checked at launch); choose among ModelRefs at run time.
+ * 声明子代理可用的模型："modelId" 或 "providerId/modelId"，可选 "$level"。
+ * 只能字面量（启动时检查）；运行期在多个 ModelRef 中选择。
  */
 declare function model(id: string): ModelRef;
 
-/** Persona of a subagent, fixed when agent() creates it. Every subagent has the same working tools. */
+/** 子代理的角色设定，在 agent() 创建时冻结。每个子代理拥有相同的工作工具。 */
 declare interface AgentPersona {
-  /** System prompt describing the actor's role. */
+  /** 描述角色行为的系统提示。 */
   system?: string;
-  /** Model id literal or ModelRef; omitted = the run's subagent model. */
+  /** 模型 id 字面量或 ModelRef；缺省 = 本次运行的 subagent_model。 */
   model?: ModelRef | string;
 }
 
 /**
- * A subagent: one conversation that keeps its context across asks. Asks issued while it is
- * busy wait their turn, first in, first out.
+ * 一个子代理：一段对话，跨 ask 保留上下文。子代理忙时发出的 ask 按先进先出排队。
  */
 declare interface Agent {
   /**
-   * Give the subagent one task. With a type argument, the answer is a value of type T,
-   * validated against a schema built from it: T is an interface you define in this script
-   * with a plain "interface" declaration (no "declare" modifier). Without one, the answer is
-   * the subagent's final reply text.
+   * 给子代理一个任务。带类型参数时，答案是 T 类型的值，按从 T 构造的 schema 校验：
+   * T 是你在脚本里用普通 "interface" 声明定义的接口（不要 "declare" 修饰符）。
+   * 不带类型参数时，答案是子代理的最终回复文本。
    */
   ask<T = string>(instructions: string): Node<T>;
 }
 
 /**
- * Create a subagent. Every call starts a new, empty conversation; to share one, share the
- * returned value. A non-empty name is an identity: unique within the run (a literal duplicate
- * is a compile error, a computed one fails the run) and the key AmendWorkflow matches cached
- * work by. Unnamed subagents are allowed and never reuse cached work.
+ * 创建子代理。每次调用打开新的空白对话；要共享上下文就共享返回的值。
+ * 非空名字是身份：在一次运行内唯一（字面量重复是编译错误，运行期拼出的会失败），
+ * 也是 AmendWorkflow 匹配缓存工作的键。匿名允许，且永远不复用缓存。
  */
 declare function agent(name?: string, persona?: string | AgentPersona): Agent;
 
 /**
- * The run's arguments. For a saved workflow they are validated against its declared
- * arguments, with defaults filled in, before the run starts; an inline script or a snippet
- * gets {}. Always defined; the values are unknown, so narrow them (String(args.target), a
- * typeof guard).
+ * 运行参数。已保存工作流的参数在运行前按声明校验并填默认值；内联脚本或片段得到 {}。
+ * 永远已定义；值是 unknown，要收窄（String(args.target)、typeof 守卫）。
  */
 declare const args: Readonly<Record<string, unknown>>;
 
-/** Emit a progress message to the user. */
+/** 向用户发一条进度消息。 */
 declare function log(message: string): void;
 
 /**
- * Publish one intermediate result while the run is going; returns nothing. Items are
- * recorded: a resumed run never shows one twice, and they reach the completion notification
- * even when the run fails. The item must be JSON-serializable (plain objects, arrays, strings,
- * numbers, booleans, null); functions, class instances, Date and promises are compile
- * errors. Caps fail the whole run, not the call: 65,536 items per run, 1 MiB per serialized
- * item, 1 GiB per run.
+ * 运行进行中发布一条中间结果；无返回值。条目有记录：恢复的运行不会重复显示，
+ * 运行失败时也会随完成通知送达。条目必须可 JSON 序列化（普通对象、数组、字符串、
+ * 数字、布尔、null）；函数、类实例、Date、promise 是编译错误。上限会让整个运行失败，
+ * 不是单次调用失败：每次运行 65,536 条、单条序列化后 1 MiB、每次运行 1 GiB。
  *
- * artifactId routes the item to a dashboard: a compile-time literal naming a preset
- * (artifact.chart / table / metrics / board) whose declaration has executed by then. The
- * item becomes one point, row, tile value or card there and still lands in the run's
- * Results. A tag naming nothing, or a file/markdown artifact, fails the run.
+ * artifactId 把条目路由到看板：编译期字面量，指向一个届时已执行的预设
+ * （artifact.chart / table / metrics / board）。条目在那里成为一个点、一行、一个磁贴值或一张卡，
+ * 同时仍落在运行结果里。标签指不到东西，或指向 file/markdown 产物，会让运行失败。
  */
 declare function report(item: unknown, artifactId?: string): void;
 
-/** A published artifact version: the id it was published under, and which version this call minted. */
+/** 已发布产物的一个版本：发布时用的 id，以及本次调用铸出的版本号。 */
 declare interface ArtifactRef { id: string; version: number }
-/** Card metadata every artifact kind accepts. */
+/** 每种产物都接受的卡片元数据。 */
 declare interface ArtifactOptions {
-  /** Shown as the card title; defaults to the id. In the user's language. */
+  /** 卡片标题；缺省用 id。用用户的语言。 */
   title?: string;
-  /** A sentence or two, shown beside the title when this artifact is the run's primary. */
+  /** 一两句话，产物作为运行的主交付物时显示在标题旁。 */
   description?: string;
-  /** The run's deliverable: the card and the run pane lead with it. At most one id per run; once set it stays set for later versions. */
+  /** 运行的交付物：卡片和运行面板以它为首。每次运行至多一个 id；一旦设置，后续版本保持设置。 */
   primary?: boolean;
 }
 declare interface ArtifactFileOptions extends ArtifactOptions {
-  /** Overrides the type sniffed from the extension ("application/pdf", "text/html", …). */
+  /** 覆盖从扩展名猜出的类型（"application/pdf"、"text/html" 等）。 */
   contentType?: string;
 }
-/** One value taken from a reported item: a dot path into the item ("timing.after"). */
+/** 从上报条目里取的一个值：指向条目的点路径（"timing.after"）。 */
 declare interface ArtifactField { field: string; label?: string; unit?: string }
 declare interface ChartSpec extends ArtifactOptions {
-  type?: "line" | "bar" | "scatter";        // default "line"
+  type?: "line" | "bar" | "scatter";        // 缺省 "line"
   x: ArtifactField;
-  y: ArtifactField | ArtifactField[];        // several = several series
-  scale?: "linear" | "log";                  // y axis, default "linear"
-  /** A reference value drawn as a horizontal rule, taken from the first item that has the field. */
+  y: ArtifactField | ArtifactField[];        // 多个 = 多条序列
+  scale?: "linear" | "log";                  // y 轴，缺省 "linear"
+  /** 画成水平参考线的值，取第一个带该字段的条目。 */
   baseline?: ArtifactField;
 }
 declare interface TableSpec extends ArtifactOptions {
   columns: ArtifactField[];
-  /** Field that identifies a row; a later item with the same key replaces the row. Absent = append-only. */
+  /** 标识行的字段；同键的后续条目替换该行。缺省 = 只追加。 */
   key?: string;
 }
 declare interface MetricsSpec extends ArtifactOptions {
-  /** Each tile shows the value from the latest item that has the field. */
+  /** 每块磁贴显示拥有该字段的最新条目值。 */
   metrics: ArtifactField[];
 }
 declare interface BoardSpec extends ArtifactOptions {
-  /** Field identifying a card; a later item with the same key moves/updates the card. */
+  /** 标识卡片的字段；同键的后续条目移动/更新卡片。 */
   key: string;
-  /** Field holding the card's column. */
+  /** 持有卡片所在列的字段。 */
   status: string;
-  /** Column order. Items whose status is not listed land in a trailing "other" column. */
+  /** 列顺序。状态不在列表里的条目落在末尾的 "other" 列。 */
   columns: string[];
-  /** Field for the card title (default: the key) and extra fields shown on the card. */
+  /** 卡片标题字段（缺省：键）和卡片上显示的额外字段。 */
   cardTitle?: string;
   detail?: ArtifactField[];
 }
 /**
- * Publish what the user keeps: cards beside the run, kept after it ends. Every id is a
- * compile-time string literal (non-empty, at most 64 characters of [A-Za-z0-9_.-]) and is
- * used with one member only.
- * - CONTENT (file, markdown) are effects: async, resolve to an ArtifactRef, and reject
- *   catchably (missing file, not a file, outside the workspace, over the cap, or no artifact
- *   store in this host).
- *   Bytes are copied at publish time; republishing an id mints the next version and keeps
- *   the old ones.
- * - PRESET (chart, table, metrics, board) are declarations: synchronous and void, drawn from
- *   the items tagged report(item, "<id>"). Declare each once, at the top level; an identical
- *   re-declaration is a no-op, a different or malformed spec fails the whole run.
- * Caps: 32 ids per run, 16 versions per id, 20 MiB per file, 256 KB per markdown, 120
- * characters of title and 500 of description.
+ * 发布用户留下来的东西：运行旁边的卡片，结束后保留。每个 id 是编译期字面量
+ * （非空、至多 64 个 [A-Za-z0-9_.-] 字符），且只与一个成员搭配使用。
+ * - 内容类（file、markdown）是副作用：异步，解析为 ArtifactRef，可捕获地拒绝
+ *   （文件缺失、不是文件、在工作区外、超上限，或本宿主没有产物存储）。
+ *   字节在发布时复制；同一 id 再次发布会铸出下一版并保留旧版。
+ * - 预设类（chart、table、metrics、board）是声明：同步、void，由打了
+ *   report(item, "<id>") 标签的条目绘制。每个在顶层声明一次；完全相同的重复声明是空操作，
+ *   不同或畸形的声明会让整个运行失败。
+ * 上限：每次运行 32 个 id、每个 id 16 版、单文件 20 MiB、markdown 256 KB、
+ * 标题 120 字符、描述 500 字符。
  */
 declare const artifact: {
-  /** Publish a workspace file, path resolved as in files.read(). The type comes from the extension unless opts.contentType sets it. */
+  /** 发布一个工作区文件，路径解析同 files.read()。类型来自扩展名，除非 opts.contentType 指定。 */
   file(id: string, path: string, opts?: ArtifactFileOptions): Promise<ArtifactRef>;
-  /** Publish markdown text the script composed. */
+  /** 发布脚本拼出的 markdown 文本。 */
   markdown(id: string, content: string, opts?: ArtifactOptions): Promise<ArtifactRef>;
-  /** Declare a chart fed by report(item, id): each tagged item is one point. */
+  /** 声明一个由 report(item, id) 喂养的图表：每个打标签的条目是一个点。 */
   chart(id: string, spec: ChartSpec): void;
-  /** Declare a table fed by report(item, id): each tagged item is one row. */
+  /** 声明一个由 report(item, id) 喂养的表格：每个打标签的条目是一行。 */
   table(id: string, spec: TableSpec): void;
-  /** Declare a metric tile row fed by report(item, id): each tile shows the newest value it has. */
+  /** 声明一行由 report(item, id) 喂养的指标磁贴：每块显示它拥有的最新值。 */
   metrics(id: string, spec: MetricsSpec): void;
-  /** Declare a board fed by report(item, id): each tagged item is a card, placed by its status field. */
+  /** 声明一个由 report(item, id) 喂养的看板：每个打标签的条目是一张卡，按 status 字段放置。 */
   board(id: string, spec: BoardSpec): void;
 };
 
 /**
- * Mark the start of a phase: a named group of the steps that follow, drawn as one node on
- * the graph the user approves. Presentation only: it starts, waits for and returns nothing.
- * Required. The name is a non-empty compile-time literal and the call a standalone
- * statement. A marker covers every step from it to the end of the block it stands in
- * (nested blocks and inlined helpers included); two markers with the same name are one
- * phase. Every phase contains at least one ask or world.run.
+ * 标记一个阶段的开始：其后步骤组成一个命名组，在用户批准的图上画成一个节点。
+ * 仅作用于展示：不启动、不等待、不返回任何东西。必填。名字是非空编译期字面量，
+ * 调用是独立语句。标记覆盖从它到所在块末尾的一切（嵌套块和内联 helper 都算）；
+ * 两个同名标记是一个阶段。每个阶段至少含一个 ask 或 world.run。
  */
 declare function phase(name: string): void;
 
 /**
- * A typed gap: code you write later, once an earlier step's findings are in. When the run
- * reaches an unfilled hole, that branch waits while you write the body (FillWorkflowHole);
- * the rest of the run keeps going. prompt is the message you will receive, so interpolate
- * the values the decision needs. The body runs in the hole's place, sees the bindings
- * declared before it, and returns the hole's value. The filled form passes the body last.
+ * 一个有类型的缺口：等更早步骤的发现到了再写的代码。运行到达未填充的洞时，
+ * 这条分支等待，同时你来写函数体（FillWorkflowHole）；其余运行继续。
+ * prompt 是你将收到的消息，所以把决策需要的值插值进去。函数体在洞的位置运行，
+ * 能看到之前声明的绑定，并返回洞的值。填充形式把函数体放在最后。
  */
 declare function hole<T>(name: string, prompt?: string): Promise<T>;
 declare function hole<T>(name: string, body: () => Promise<T>): Promise<T>;
 declare function hole<T>(name: string, prompt: string, body: () => Promise<T>): Promise<T>;
 
-/** One matching line found by files.grep. */
+/** files.grep 找到的一行匹配。 */
 declare interface GrepMatch {
-  /** Workspace-relative path of the file the match was found in. */
+  /** 匹配所在文件的工作区相对路径。 */
   path: string;
-  /** One-based line number of the match. */
+  /** 从 1 开始的行号。 */
   line: number;
-  /** The full text of the matching line. */
+  /** 匹配行的完整文本。 */
   text: string;
 }
 
 /**
- * Read-only views of the workspace. Each result is recorded, so a resumed run gets the same
- * answer back instead of reading again. There is no write: writing is a subagent's task.
+ * 工作区的只读视图。每个结果都被记录，恢复的运行拿回同样的答案而不是重读。
+ * 没有写入：写是子代理的任务。
  */
 declare const files: {
-  /** Workspace-relative paths matching a glob, sorted. Over 2000 files the call rejects. */
+  /** 匹配 glob 的工作区相对路径，已排序。超过 2000 个文件时调用拒绝。 */
   glob(pattern: string): Promise<string[]>;
-  /** Read one workspace file as UTF-8 text. Size-capped. */
+  /** 按 UTF-8 读一个工作区文件。有大小上限。 */
   read(path: string): Promise<string>;
   /**
-   * Search contents with a ripgrep-compatible regex, optionally narrowed by a glob over
-   * paths ("*.ts", "src/**"); one entry per matching line. Over 2000 matches or 256KB of
-   * results the call rejects.
+   * 用兼容 ripgrep 的正则搜索内容，可选按路径 glob 收窄（"*.ts"、"src/**"）；
+   * 每个匹配行一条。超过 2000 个匹配或 256KB 结果时调用拒绝。
    */
   grep(pattern: string, glob?: string): Promise<GrepMatch[]>;
 };
 
-/** The working tree's status, as reported by git.status(). */
+/** 工作树状态，由 git.status() 报告。 */
 declare interface GitStatus {
-  /** Current branch name; absent when HEAD is detached. */
+  /** 当前分支名；HEAD 分离时缺失。 */
   branch?: string;
-  /** True when nothing is staged, modified, or untracked. */
+  /** 没有暂存、修改或未跟踪内容时为真。 */
   clean: boolean;
-  /** Workspace-relative paths staged for the next commit. */
+  /** 已暂存待提交的工作区相对路径。 */
   staged: string[];
-  /** Workspace-relative paths modified in the working tree but not staged. */
+  /** 工作树中已修改但未暂存的工作区相对路径。 */
   unstaged: string[];
-  /** Workspace-relative paths git does not track (honouring .gitignore). */
+  /** git 未跟踪的路径（遵守 .gitignore）。 */
   untracked: string[];
 }
 
-/** One commit, as reported by git.log(). */
+/** 一次提交，由 git.log() 报告。 */
 declare interface GitCommit {
-  /** Full commit hash. */
+  /** 完整提交哈希。 */
   hash: string;
-  /** First line of the commit message. */
+  /** 提交信息第一行。 */
   subject: string;
-  /** Author name. */
+  /** 作者名。 */
   author: string;
-  /** Author date, ISO 8601. */
+  /** 作者日期，ISO 8601。 */
   date: string;
 }
 
 /**
- * Read-only git views, recorded like files.* so a resumed run gets the same answer back; no
- * call can write. A base names a single ref (no ".." ranges). Paths are workspace-relative, and
- * changes outside the workspace are not reported; git.log alone is repository-wide. Caps
- * reject rather than truncate: diff at 512KB, log at 100 commits. Outside a git repository,
- * or without git, every call rejects catchably.
+ * 只读 git 视图，像 files.* 一样被记录，恢复的运行拿回同样的答案；没有调用能写。
+ * base 指单个 ref（不含 ".." 范围）。路径是工作区相对路径，工作区之外的改动不报告；
+ * 只有 git.log 是仓库级的。上限是拒绝而不是截断：diff 512KB、log 100 次提交。
+ * 在 git 仓库之外或没有 git 时，每个调用都可捕获地拒绝。
  */
 declare const git: {
   /**
-   * Workspace-relative paths that changed. With no base: files modified against HEAD, plus
-   * untracked files. With a base ref: tracked files whose current state differs from that
-   * ref, uncommitted edits included, untracked files not.
+   * 相对 base 有变动的工作区相对路径。无 base：相对 HEAD 修改的文件，加上未跟踪文件。
+   * 有 base ref：当前状态与该 ref 不同的已跟踪文件，包含未提交修改，不含未跟踪文件。
    */
   changedFiles(base?: string): Promise<string[]>;
   /**
-   * Unified diff against base (default HEAD). Covers the whole workspace unless you
-   * narrow it to one workspace-relative path.
+   * 相对 base（缺省 HEAD）的统一 diff。除非收窄到一个工作区相对路径，否则覆盖整个工作区。
    */
   diff(base?: string, path?: string): Promise<string>;
-  /** The current working-tree status, for the workspace. */
+  /** 当前工作树状态，面向工作区。 */
   status(): Promise<GitStatus>;
-  /** The most recent commits, newest first. Default 20, maximum 100. */
+  /** 最近的提交，最新的在前。缺省 20，最多 100。 */
   log(count?: number): Promise<GitCommit[]>;
 };
 
-/** The outcome of one world.run command, including nonzero exits. */
+/** 一次 world.run 命令的结果，包含非零退出。 */
 declare interface WorldRunResult {
-  /** The process exit code. Nonzero is a normal, returned outcome — branch on it. */
+  /** 进程退出码。非零是正常返回值——对它分支。 */
   exitCode: number;
-  /** Captured stdout (UTF-8). Capped at 256KB; over the cap the call rejects. */
+  /** 捕获的 stdout（UTF-8）。上限 256KB；超过时调用拒绝。 */
   stdout: string;
-  /** Captured stderr (UTF-8). Same cap and rejection semantics as stdout. */
+  /** 捕获的 stderr（UTF-8）。上限与拒绝语义同 stdout。 */
   stderr: string;
 }
 
 /**
- * Run a command. Each call runs once and its result is recorded: a resumed run reuses the
- * recorded result instead of running the command again. A completed process RESOLVES,
- * nonzero exit included; the promise rejects (catchably) only on spawn failure or timeout
- * (default 300000ms, timeoutMs overrides, no upper cap). cmd is a compile-time string
- * literal, shown to the user at confirmation. Fixed argv, never a shell: no pipes,
- * redirection or expansion. cwd is the workspace. Node builtins are reachable as
- * world.run("node", ["-e", code]).
+ * 运行一个命令。每次调用只跑一次，结果被记录：恢复的运行重用记录的结果而不是重跑。
+ * 进程完成即 RESOLVE，非零退出也一样；promise 只在 spawn 失败或超时时（可捕获地）拒绝，
+ * 超时缺省 300000ms，timeoutMs 覆盖，无上界。cmd 是编译期字面量，确认时展示给用户。
+ * 固定 argv，绝不过 shell：没有管道、重定向或展开。cwd 是工作区。
+ * Node 内建可用 world.run("node", ["-e", code]) 触达。
  */
 declare const world: {
   run(cmd: string, args?: string[], opts?: { timeoutMs?: number }): Promise<WorldRunResult>;
 };
 
 /**
- * A stream of typed items between two stages: one stage send()s, another drains it with
- * for await. Unbounded, first-in-first-out, each item to exactly one receiver.
+ * 两个阶段之间的类型化项目流：一个阶段 send()，另一个用 for await 消费。
+ * 无界、先进先出、每项恰好给一个接收者。
  */
 declare interface Channel<T> extends AsyncIterable<T> {
-  /** Enqueue one item; synchronous, never waits. Throws ChannelClosed after close(). */
+  /** 入队一项；同步，从不等待。close() 之后抛 ChannelClosed。 */
   send(item: T): void;
   /**
-   * End the stream: receivers get the remaining items, then their loops exit. Idempotent.
-   * A channel nobody closes fails the run as ChannelDeadlock, naming it, once nothing in
-   * flight could send to it again.
+   * 结束流：接收者先拿到剩余条目，然后循环退出。幂等。
+   * 再也没人能发送的通道会让运行失败为 ChannelDeadlock 并点名它，一旦在途工作不可能再发送。
    */
   close(): void;
 }
 
 /**
- * Create a channel. The name labels the deadlock message; it is not an identity. A receiver
- * on an empty, open channel waits until a send or the close.
+ * 创建通道。名字用于死锁消息；不是身份。
+ * 空且开着的通道上的接收者会等待发送或关闭。
  */
 declare function channel<T>(name?: string): Channel<T>;
 
 /**
- * Run an async block as a concurrent stage. It starts immediately, not when awaited, and
- * returns its promise.
+ * 把一个异步块作为并发阶段运行。它立即启动，不是等你 await，并返回 promise。
  */
 declare function future<T>(body: () => Promise<T>): Promise<T>;
 ```
 <!-- facade-dts:end -->
 
-### 16.3 Rules the compiler and the analyzer enforce
+### 16.3 编译器与分析器强制执行的规则
 
-- Plain TypeScript. Define result types with a plain `interface Foo { ... }` or
-  `type Foo = ...` and pass them as `ask<T>` type arguments.
-- Compiled under `strict` with `noUncheckedIndexedAccess` off: indexing an array or record
-  (`items[i]`) needs no guard. `.find()`, `.match()`, `Map.get()` and optional properties
-  still yield `T | undefined` / `null` and must be guarded before use.
-- Never use the `declare` modifier: the script is compiled inside a function body, where
-  ambient declarations are illegal. No `export` statements — the workflow's output is its
-  final `return`. No `import` statements.
-- Top-level `await` and a final `return <value>` are allowed; the returned value is exactly
-  what the completion notification carries.
-- No Node or web APIs: `process`, `fetch`, `fs` do not exist and fail typechecking.
-- `world.run` executes a real command. Its first argument must be a compile-time string
-  literal — the script's command set is shown to the user at confirmation — so interpolate
-  runtime values into the args array, never into the command name. A nonzero exit code
-  comes back as a value, not an exception (§5).
-- `hole<T>()` (§15): explicit type argument; a literal name of at most 128 characters,
-  unique among the script's holes and phase markers; the call awaited and written inline;
-  outside every array-method fan-out callback (a `for...of` body is fine); the body reads no
-  binding declared after the hole. All of these are diagnostic 9012.
-- Phases are required (§8): cover the whole script with `phase("...")` markers, one at the
-  head of each stage. The name is a compile-time string literal and the call is a standalone
-  statement; the marker claims the rest of its enclosing block, nested blocks and inlined
-  helper calls included, so a marker inside an `if` covers that branch only. Two markers
-  with the same name are one phase, which is how a retry loop stays two nodes instead of
-  per-round sprawl. Every phase contains at least one subagent `ask` or one `world.run`;
-  plain script logic between two asks is not a stage, so do not open a phase for the setup
-  at the top or the `return` at the bottom.
-- Subagent names: the name you pass to `agent("...")` is the card the user sees, so write
-  it for the user in the session's language (§9). It is also an identity: unique within the
-  run, and the key an amended run matches its cached results by. Keep names stable across
-  revisions, and give duplicates in a loop their own computed names.
-- Artifact ids and the `report` tag are compile-time literals; one id belongs to one
-  artifact kind; at most one artifact carries `primary: true`; a preset artifact is declared
-  at the top level, not inside a loop, callback or branch (§10), and a fill's body is where
-  its hole stands. Publishing rejects catchably when the file is missing or too large.
-- Model-side errors never reach the script. Rate limits, overload, network errors and
-  timeouts are retried by the runtime without limit while it adapts the fan-out; a
-  deterministic one (expired sign-in, model not in the plan, quota cap) stops the run as
-  `stopped` for the user to fix and resume. Write no retry loops or `try`/`catch` for
-  provider errors; reserve them for logic failures — a result that failed validation, a gate
-  that did not pass, a world read over its cap, a missing artifact source, or a
-  `ContextLimit` (the ask outgrew the model's context even after compaction: split it).
-- `channel`, `future`, `Channel.send` and `Channel.close` are facade callables: call them
-  directly (9001 applies to a stored or aliased call); a channel value itself may be stored
-  or passed freely. `send` after `close()` throws
-  `ChannelClosed`, catchable. Stalls fail the run, never time out: `ChannelDeadlock` when
-  receivers wait on channels nothing can send to any more (naming each), `ScriptStalled` when
-  some other promise can never settle.
-- The final `return` is the model-facing result; artifacts are the user-facing deliverable.
-  Never put the same content in both.
-- On diagnostics, edit the file the result names and call the tool again with `path`; never
-  paste the script a second time.
+- 普通 TypeScript。结果类型用普通 `interface Foo { ... }` 或 `type Foo = ...` 定义，并作为 `ask<T>` 类型参数传入。
+- 在 `strict` 下编译，`noUncheckedIndexedAccess` 关闭：数组或记录索引（`items[i]`）不需要守卫。`.find()`、`.match()`、`Map.get()` 和可选属性仍然产出 `T | undefined` / `null`，使用前必须守卫。
+- 绝不用 `declare` 修饰符：脚本编在一个函数体里，ambient 声明在那里非法。不要 `export` 语句——工作流的输出是最终 `return`。不要 `import`。
+- 允许顶层 `await` 和最终 `return <value>`；返回的值正是完成通知携带的内容。
+- 不要 Node 或 web API：`process`、`fetch`、`fs` 不存在，类型检查失败。
+- `world.run` 执行真实命令。第一个参数必须是编译期字面量——脚本的命令集合在确认时展示给用户——所以运行期值插值进 args 数组，绝不插进命令名。非零退出码作为值返回，不是异常（§5）。
+- `hole<T>()`（§15）：显式类型参数；名字字面量至多 128 字符，在脚本的洞和阶段标记中唯一；调用被 await 且内联书写；在所有数组方法扇出回调之外（`for...of` 体可以）；函数体不读洞之后声明的绑定。以上任何一条违反都是诊断 9012。
+- 阶段是必填的（§8）：用 `phase("...")` 标记覆盖整个脚本，每个阶段头部一个。名字是编译期字面量，调用是独立语句；标记认领其所在块的后半段（嵌套块和内联 helper 调用都算），所以 `if` 里的标记只覆盖那个分支。两个同名标记是一个阶段——这是重试循环保持两个节点而不是每轮膨胀的方式。每个阶段至少含一个子代理 `ask` 或一个 `world.run`；两个 ask 之间的纯脚本逻辑不是阶段，所以别为顶部的准备或底部的 `return` 开阶段。
+- 子代理名字：传给 `agent("...")` 的名字是用户看到的卡片，所以用本会话的语言、为用户而写（§9）。它也是身份：一次运行内唯一，也是修订后的运行按它匹配缓存结果的键。跨修订保持名字稳定，循环里的重复给各自算出来的名字。
+- 产物 id 和 `report` 标签是编译期字面量；一个 id 只属于一种产物；至多一个产物带 `primary: true`；预设产物在顶层声明，不在循环、回调或分支里（§10），填充的函数体算在洞所在的位置。文件缺失或过大时发布可捕获地拒绝。
+- 模型侧错误永远到不了脚本。限流、过载、网络错误和超时由运行时无限重试，同时它会自适应扇出；确定性的错误（登录过期、模型不在计划内、配额上限）让运行以 `stopped` 停下，等用户修复并恢复。不要为 provider 错误写重试循环或 `try`/`catch`；把它们留给逻辑失败——结果校验失败、门禁没过、世界读取超上限、产物源缺失、或 `ContextLimit`（ask 即使压缩后仍超出模型上下文：拆开它）。
+- `channel`、`future`、`Channel.send` 和 `Channel.close` 是 facade 可调用物：直接调用（9001 适用于存储或别名后的调用）；通道值本身可以自由存储或传递。`send` 在 `close()` 之后抛 `ChannelClosed`，可捕获。停滞让运行失败、从不超时：`ChannelDeadlock` 在接收者等待再也没人能发送的通道时失败（逐个点名），`ScriptStalled` 在其他 promise 永远无法落定时失败。
+- 最终 `return` 是模型面对的结果；产物是用户面对的交付物。绝不要同一份内容同时放进两边。
+- 遇到诊断时，编辑结果点名的文件并再次调用工具、传 `path`；绝不要第二次粘贴脚本。
 
 ### 16.4 `AmendWorkflow`
 
-Revises an existing run: it starts a new run that supersedes the old one and imports its
-finished work as a cache, so only what you changed is paid for again. §13 has the cache
-rules and the repair-while-running move. It works on any run of this project — completed,
-errored, stopped or still running; a running predecessor is stopped and superseded in the
-same call, so never `TaskStop` it first and never rewrite it from scratch with
-`CreateWorkflow`. To continue a stopped run unchanged, use `ResumeWorkflowRun` instead.
+修订一个已存在的运行：它启动一个 supersede 旧运行的新运行，并把旧运行已完成的工作作为缓存导入，所以只有你改动的部分重新付费。§13 讲缓存规则和运行中修复的动作。它对项目的任何运行生效——completed、errored、stopped 或仍在跑；仍在跑的前任在同一次调用里被停止并 supersede，所以绝不要先 `TaskStop` 它，也绝不要用 `CreateWorkflow` 从零重写。要原样继续一个 stopped 的运行，用 `ResumeWorkflowRun`。
 
-**Fields — every field you omit keeps the predecessor's value.**
+**字段——每个省略的字段保留前任的值。**
 
-- `run_id` (required): from a `CreateWorkflow` or `AmendWorkflow` result, a notification,
-  `GetWorkflowRun` or `ListWorkflowRuns`.
-- `path` or `script`, never both. `path` is the usual form: the errored notification and
-  `GetWorkflowRun` name the run's script file — edit it in place and pass the same path
-  back, so a revision costs one `Edit` instead of a second copy of the whole script. A file
-  whose bytes you did not change is refused (`script_unchanged`) unless the call also
-  changes `max_concurrency` or `subagent_model`; nothing is stopped and nothing is created.
-  `script` carries a whole revised script inline, written against the same facade and rules;
-  it is saved to a draft file the result names, so the next revision can go back to `path`.
-  Omit both to keep the predecessor's script byte for byte and change only the settings
-  below; its finished work still replays from the cache.
-- `name`: a new display label; defaults to the predecessor's.
-- `max_concurrency`: omit to keep the predecessor's limit, pass `null` to remove it, pass a
-  number to change it (only when the user asks). A call carrying nothing but `run_id` and
-  `max_concurrency`, against a run that is still going, retunes that run in place instead of
-  starting a new one: same run, nothing stopped, nothing re-run.
-- `subagent_model`: omit to keep the predecessor's choice, pass `null` to put the subagents
-  back on the session model, pass a model id to change it (only when the user asks; never
-  a model under another provider the user did not name — ask them first if you think one
-  would help). `ListModels` lists the ids.
+- `run_id`（必填）：来自 `CreateWorkflow` 或 `AmendWorkflow` 的结果、通知、`GetWorkflowRun` 或 `ListWorkflowRuns`。
+- `path` 或 `script`，不能同时传。`path` 是常用形式：errored 通知和 `GetWorkflowRun` 点名运行的脚本文件——原地编辑并用同一路径交回，修订只花一次 `Edit` 而不是第二份完整脚本。字节未改的文件会被拒绝（`script_unchanged`），除非调用同时改了 `max_concurrency` 或 `subagent_model`；什么都不会停，也不会创建。
+- `name`：新的展示标签；缺省用前任的。
+- `max_concurrency`：省略保留前任的限值，`null` 移除，数字修改（只在用户要求时）。只带 `run_id` 和 `max_concurrency` 的调用，对仍在跑的运行时原地调参而不是启动新运行：同一次运行，什么都不停、什么都不重跑。
+- `subagent_model`：省略保留前任的选择，`null` 把子代理放回会话模型，模型 id 修改（只在用户要求时；绝不要用用户没点名的另一个 provider 的模型——觉得有帮助就先问）。`ListModels` 列出 id。
 
-Changing only a setting on a running run still stops it; what it had in flight runs again in
-the new run, except that a named subagent whose unfinished ask you did not change picks that
-ask up where it left off instead of starting it over.
+只改设置、对运行中的运行，仍会停掉它；它在途的东西会在新运行里重跑，除了一个命名子代理未完成的 ask，如果你没改该 ask，它从断点继续而不是重新开始。
 
-**How the cache works.** Named subagents are matched by name across the two scripts; each
-one's asks are matched in order by byte-identical instructions. A match settles from the
-recorded result at zero tokens; a changed or added ask runs live. The cache stays open until a
-live subagent makes its first write to the workspace (or a live `world.run` executes): from
-that moment, cached world reads and cached asks whose subagent had read or run something
-would describe a workspace that no longer exists, so they run live too. Asks that only
-answered keep settling from the cache. Editing an ask's text is how you force it to run
-again; keep names stable and keep tunable constants out of ask text (§13).
+**缓存怎么工作。** 命名子代理跨两个脚本按名字匹配；每个子代理的 ask 按顺序、按逐字节相同的指令匹配。匹配的从记录结果零 token 落定；改动或新增的 ask 真的跑。缓存保持开放，直到某个 live 子代理第一次写工作区（或某个 live `world.run` 执行）：从那一刻起，缓存的 world 读取和“其子代理读过或跑过东西”的缓存 ask 描述的是一个已不存在的工作区，所以它们也转为真跑。只回答过的 ask 继续从缓存落定。编辑 ask 文本就是强制它重跑的方式；名字保持稳定，可调常量不要进 ask 文本（§13）。
 
-On diagnostics nothing was stopped and nothing was started; fix the file the result names
-and call again with `path`.
+出现诊断时什么都没停、也没启动；修结果点名的文件，再用 `path` 调用一次。
 
-**Confirmation.** A run this session started (through `CreateWorkflow`, a previous
-`AmendWorkflow` or the workflows hub) is amended without a confirmation window, even while
-it is running. A run the user stopped, or a run another session started, asks the user
-first, and so does an amendment that would put subagents on a provider neither the session
-nor the run used (a model you name under another provider, in `subagent_model` or in the
-script): that choice is the user's, and the window is where they make it. The result names the run that was superseded (if one was stopped) and the new run's
-id. The superseded run sends no notification of its own; the new run notifies when it
-settles. Do not wait for it or poll it with `TaskOutput`.
+**确认。** 本会话启动的运行（经 `CreateWorkflow`、之前的 `AmendWorkflow` 或工作流中心）在修订时不开确认窗口，即使正在跑。用户停掉的运行、或其他会话启动的运行，需要用户先确认；会让子代理落到会话和运行都没用过的 provider 上的修订也一样（你在 `subagent_model` 或脚本里点名的另一个 provider 下的模型）：这个选择是用户的，窗口就是他们做选择的地方。结果会点名被 supersede 的运行（如果停了）和新运行的 id。被 supersede 的运行自己不通知；新运行落定时通知。别等它，也别用 `TaskOutput` 轮询。
 
 ### 16.5 `SaveWorkflow`
 
-Saves a script with its metadata so it can be run again by name — through `CreateWorkflow`'s
-`saved` source, discovered with `ListSavedWorkflows`. Project definitions go in
-`.zcode/workflows/<name>.dwf.ts`, committed with the repository; global definitions go in
-`~/.zcode/workflows/<name>.dwf.ts` and are available from every project on this machine.
+保存脚本及其元数据，以便按名字再次运行——通过 `CreateWorkflow` 的 `saved` 来源，用 `ListSavedWorkflows` 发现。项目定义放在 `.zcode/workflows/<name>.dwf.ts`，随仓库提交；全局定义放在 `~/.zcode/workflows/<name>.dwf.ts`，本机每个项目都可用。
 
-**When to call it.**
-
-- Never unsolicited. Saving writes a file into the user's repository; that is their
-  decision, not yours.
-- When a workflow you just built looks reusable — it would plausibly run again with
-  different inputs — suggest saving it in prose, one sentence naming what you would save and
-  why, then stop and wait. Call `SaveWorkflow` only after the user agrees, or when the user
-  asks directly ("save this workflow", "保存这个工作流"). A one-off script tailored to a
-  single question is not worth suggesting.
-
-**Fields.**
-
-- `name`: a file-safe identifier (letters, digits, dot, dash and underscore). Saving over an
-  existing name replaces that workflow, and the confirmation says whether the file is new or
-  an overwrite: reuse a name to update, pick a new one for a variant.
-- `description` (required) and `whenToUse`: written for a reader who has not seen this
-  conversation. `description` shows up wherever the workflow is listed.
-- `scope` (required, no default): `project` when the script references this repository's
-  files, commands, conventions or layout; `global` when it depends on nothing in the
-  project.
-- `script` or `script_path`, never both. `script_path` saves a draft a `CreateWorkflow` or
-  `AmendWorkflow` result named without re-emitting it; a `/* zcode-workflow` block in that
-  file is dropped, because the metadata comes from this call's fields. `script` is the body
-  only — no metadata block.
-- `args`: name exactly the values that would change between runs — a PR number, a
-  directory, a depth. Each declaration gives a `type` (`string`, `number`,
-  `boolean`, or `json` for anything else), and optionally a `description`, `required: true`
-  and a `default`; every future call is validated against them.
-
-The saved file is valid TypeScript: a `/* zcode-workflow` block of YAML metadata, then the
-script verbatim. The script is typechecked by the same compiler as `CreateWorkflow`, before
-the user is asked; diagnostics mean nothing was written. The rules in §16.3 apply, phases
-included — future callers did not see this conversation, so the phase names are all they
-get.
+**什么时候调。** 绝不主动调。保存会把文件写进用户仓库；那是用户的决定，不是你的。刚构建的工作流看起来可复用（换输入再跑一次是合理的）时，用一句话建议保存什么、为什么，然后停下等；用户同意或直接要求（“保存这个工作流”）后才调 `SaveWorkflow`。为单一问题定制的一次性脚本不值得建议。**字段**：`name` 文件安全标识（字母、数字、点、横线、下划线）；覆盖已有名字会替换该工作流，确认会说文件是新建还是覆盖——复用名字是更新，变体取新名字。`description`（必填）和 `whenToUse` 写给没看过本会话的读者。`scope`（必填，无缺省）：脚本引用本仓库文件、命令、约定或布局时用 `project`；不依赖项目里任何东西时用 `global`。`script` 或 `script_path` 不能同时传；`script_path` 保存草稿而不重新发送；该文件里的 `/* zcode-workflow` 块会被丢弃，因为元数据来自本次调用的字段。`script` 只是函数体——不带元数据块。`args` 精确命名每次运行之间会变的值——PR 号、目录、深度。每个声明给 `type`（`string`、`number`、`boolean` 或 `json`），可选 `description`、`required: true` 和 `default`；之后每次调用都按它们校验。保存的文件是合法 TypeScript：先是 `/* zcode-workflow` 的 YAML 元数据块，然后是脚本原文。脚本在询问用户前由同一个编译器类型检查；诊断意味着什么都没写。§16.3 的规则适用，包括阶段——未来的调用者没见过本会话，阶段名就是他们仅有的信息。
 
 ### 16.6 `EvalWorkflowSnippet`
 
-Compiles and runs a small snippet synchronously against the same compiler, sandbox and
-world-read execution path a real run uses, and returns the result in the tool call. Nothing
-persists: no journal rows, no background task, no run. It is the test bench of §6, for the
-fixed logic of a script or of a hole's body; it is not for orchestration.
+在同一个编译器、沙箱和 world-read 执行路径上同步编译并运行一小段代码，并在工具调用里返回结果。什么都不持久：没有日志行、没有后台任务、没有运行。它是 §6 的试验台，用于脚本或洞函数体的固定逻辑；不是用于编排的。
 
-- `code` or `path`, never both: the snippet inline, or a file holding it, read whole with no
-  metadata handling.
-- `timeoutMs`: the wall clock for the whole snippet in milliseconds; default 60000, at most
-  600000.
-- The snippet facade is the `args`, `log`, `files`/`git`, `world.run`, `channel` and `future`
-  parts of the block in §16.2; `agent()`, `report()`, `artifact.*`, `hole()` and the `phase`
-  marker are the only absentees — they do not exist here and
-  fail typechecking. The language rules are a script's: plain interfaces, top-level `await`, a
-  final `return <value>`. The returned value is serialized into the result, so return a
-  summary, not a dump; over 256KB fails the call. `log(...)` lines come back in order. A
-  snippet that contains `world.run` asks the user for confirmation before running. On
-  diagnostics nothing ran: fix the snippet and call again.
+- `code` 或 `path`，不能同时传：片段内联，或指向文件原样读取（不做元数据解析）。
+- `timeoutMs`：整个片段的墙钟上限，毫秒；缺省 60000，最多 600000。
+- 片段 facade 是 §16.2 里 `args`、`log`、`files`/`git`、`world.run`、`channel` 和 `future` 的部分；`agent()`、`report()`、`artifact.*`、`hole()` 和 `phase` 标记是仅有的缺席者——它们不存在，类型检查会失败。语言规则同脚本：普通 interface、顶层 `await`、最终 `return <value>`。返回值会被序列化进结果，所以返回摘要而不是转储；超过 256KB 会让调用失败。`log(...)` 行按顺序返回。含 `world.run` 的片段在运行前请用户确认。诊断意味着什么都没跑：修片段再调用。
 
 ### 16.7 `FillWorkflowHole`
 
-Writes the body of a hole a run is waiting at (§15). It starts nothing: the run keeps its id,
-journal and subagents, and the effective script — the run's script with the body spliced in —
-is what a resume replays, an amend revises and `SaveWorkflow` keeps.
+写一个运行正等着的洞的函数体（§15）。它不启动任何东西：运行保留 id、日志和子代理，而有效脚本——拼入函数体的运行脚本——是恢复所重放的、修订所修改的、`SaveWorkflow` 所保存的。
 
-- `run_id` and `hole_id` (required): from the notification or `GetWorkflowRun`; the hole id
-  is the site id (`hole#21b40fca`), not the name.
-- `script` or `path`, never both: the body's statements only. An inline `script` is written to
-  a fill file under `.zcode/workflow-drafts/` before it is compiled and the result names it;
-  `path` is usually that file after an `Edit`, and bytes equal to the last rejected attempt
-  are refused as `fill_unchanged`.
+- `run_id` 和 `hole_id`（必填）：来自通知或 `GetWorkflowRun`；洞 id 是站点 id（`hole#21b40fca`），不是名字。
+- `script` 或 `path`，不能同时传：只写函数体的语句。内联 `script` 在编译前写到 `.zcode/workflow-drafts/` 下的填充文件，结果给出该路径；`path` 通常是 `Edit` 之后的那个文件，字节与上次被拒的尝试相同时拒绝为 `fill_unchanged`。
 
-The body is compiled where the hole stands, against the whole script; a diagnostic is anchored
-to the file it falls in — the fill file inside the body, the run's draft outside it — and on
-diagnostics nothing is spliced. A body may name only the models the run was launched with; any
-other model is diagnostic 9011 — to add one, amend the run.
-`hole_not_waiting` means the run is not in flight or not
-waiting at that hole (filled, not yet reached, unknown id); resume a stopped run first and the
-hole asks again. A body may end in a new tail hole instead of returning (§15). On success the
-response names the phases added and the run's draft, rewritten in place with the effective
-script. Confirmation follows the amend rule (§16.4): this session's run fills without a
-window; otherwise the window shows the new stations and the `world.run` commands the body
-adds.
+函数体在洞的位置编译，对照整份脚本；诊断锚定在它所在的文件——函数体内的填在填充文件，外面的在运行草稿。出现诊断时什么都没拼进去。函数体只能点名运行启动时带的模型；任何其他模型是诊断 9011——要加模型，修订运行。`hole_not_waiting` 表示运行不在飞行中或不在等那个洞（已填、还没到、未知 id）；先恢复 stopped 的运行，洞会再问。函数体可以以新的尾洞结束而不是返回（§15）。成功时响应列出新增的阶段和运行草稿——已原地重写为有效脚本。确认遵循 amend 规则（§16.4）：本会话的运行无需窗口即可填充；否则窗口展示新站点和函数体新增的 `world.run` 命令。
+
+## 延伸阅读
+
+- `patterns.md`——拓扑目录。索引把流水线形状放在最前：逐项链式、经通道流式、带计数关闭的反馈环。然后是扇出/汇合、评审扫荡、规划-评审循环、评委面板、分阶段交接、有界发现、`world.run` 门禁的核对循环、模型路由，以及洞的形状（尾洞生长、由发现塑形的阶段、补救洞）。知道想要的形状、想把它写对时读它。
+- `examples.md`——完整的实干脚本，包括一个两子代理的证/反证对抗循环，以及一个通过尾洞逐步长出来的仓库导览。想看一个完整脚本的弧线时读一个。

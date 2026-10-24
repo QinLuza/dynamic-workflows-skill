@@ -1,40 +1,38 @@
-# Worked dynamic-workflow examples
+# 动态工作流实操示例
 
-Seven complete scripts, end to end. Each is a whole arc — world read, topology, loop or
-fan-out, salvage, artifacts, return shape — so read one when you want to see how the pieces
-sit together rather than looking up a single shape (`patterns.md` is for that).
+七个完整的脚本，从头到尾。每个都是一条完整的弧线——读取世界、拓扑、循环或扇出、
+抢救、产物、返回形态——所以当你想看各个部件如何拼装在一起时，就通读一个，而不是
+去查某个单一形态（那件事归 `patterns.md`）。
 
-Every script here is submitted as the `script` argument of the `CreateWorkflow` tool. The
-API surface they are written against is `SKILL.md` §16 (the facade block in §16.2 and the
-rules in §16.3), not the tool description.
+本文件中的每个脚本都作为 `CreateWorkflow` 工具的 `script` 参数提交。它们针对编写的
+API 面是 `SKILL.md` §16（§16.2 的门面代码块与 §16.3 的规则），而不是工具描述。
 
 ---
 
-## 1. Adversarial implement ↔ verify loop
+## 1. 对抗式实现 ↔ 验证循环
 
-Two subagents with opposed jobs, looping until the verifier cannot break the implementation.
-The shape generalizes to anything with an author and a skeptic: code and property test, proof
-and counter-example, schema and fuzzer.
+两个分工对立的子代理，循环往复，直到核对员再也无法击破实现。这个形态可推广到一切
+"作者 + 怀疑者"的组合：代码与性质测试、证明与反例、schema 与模糊测试器。
 
 <!-- compile -->
 ```ts
 interface ImplUpdate {
-  /** Files this round changed. */
+  /** 本轮修改的文件。 */
   changed: string[];
-  /** How this version addresses the previous counter-example. */
+  /** 这个版本如何回应上一条反例。 */
   notes: string;
-  /** Whether the author's own build and tests passed before handing off. */
+  /** 交出之前，作者自己的构建与测试是否通过。 */
   selfCheckPassed: boolean;
 }
 
 interface Verdict {
-  /** True only when the property was actually verified, not merely left untested. */
+  /** 仅当性质确实被验证过、而不只是没人测过时才为 true。 */
   verified: boolean;
-  /** Where the verification lives, when it succeeded. */
+  /** 验证成功时，验证产物所在之处。 */
   proofPath?: string;
-  /** Concrete inputs that break the implementation, when it failed. */
+  /** 验证失败时，能击破实现的具体输入。 */
   counterExamples?: string[];
-  /** Why. This is the input to the implementer's next round. */
+  /** 原因。这是实现者下一轮的输入。 */
   reason: string;
 }
 
@@ -58,7 +56,7 @@ const verifier = agent("verifier", {
 
 const MAX_ROUNDS = 8;
 
-// What a watcher wants to know mid-run: which round, and how many attacks are still open.
+// 观察者在运行中途想知道的：进行到第几轮，还有多少攻击尚未解决。
 artifact.metrics("progress", {
   title: "Verification progress",
   metrics: [{ field: "round", label: "Round" }, { field: "open", label: "Open counter-examples" }],
@@ -94,8 +92,8 @@ while (!verdict.verified && round < MAX_ROUNDS) {
   );
 }
 
-// The verifier's word is a claim; the test file is a fact. Run it once for real before the
-// result is called verified — the verifier may have run it, but this is the run that counts.
+// 核对员的话只是一种主张；测试文件才是事实。在把结果称为已验证之前，
+// 真正跑一遍——核对员可能跑过，但这一次运行才算数。
 phase("Run the property tests for real");
 const proof = await world.run("npx", ["vitest", "run", TEST_PATH], { timeoutMs: 600_000 });
 const verified = verdict.verified && proof.exitCode === 0;
@@ -137,91 +135,87 @@ return {
 };
 ```
 
-**Why it is written this way.** Both subagents live outside the loop, so each keeps everything
-it learned: the implementer remembers the approaches it already tried, and the verifier
-remembers which attacks already worked. Both genuinely edit and run files.
+**为什么这样写。** 两个子代理都活在循环之外，因此各自保留了学到的一切：实现者记得
+自己已经试过的思路，核对员记得哪些攻击已经奏效。二者都真实地编辑并运行文件。
 
-The subagents exchange **paths and descriptions, never file contents**; each reads the other's
-work with its own tools. Each round is reported as it happens, so a run that dies on round
-six still shows five rounds of counter-examples. And the return value says `verified` and
-`rounds`, so a caller can tell convergence from exhaustion — and opens with a `conclusion`
-and closes with `notCovered`, because the return value is what the main agent retells.
+子代理之间交换的是**路径与描述，从不交换文件内容**；各自用自己的工具去读对方的
+工作。每一轮都在发生时上报，所以一条死在第六轮的运行仍会留下五轮的反例。返回值
+里有 `verified` 和 `rounds`，调用者由此能分辨"收敛了"还是"轮数耗尽了"——返回值以
+`conclusion` 开头、以 `notCovered` 收尾，因为返回值正是主代理要复述的内容。
 
-`verified` is not the verifier's word. The verifier is a subagent, and a subagent's "I ran
-the tests" is a claim; the `world.run` at the end runs the test file for real and its exit
-code is what the result rests on. The implementer's persona names the exact commands it
-must run for the same reason — "run the tests" lets a subagent pick the fastest thing that
-turns green.
+`verified` 不是核对员说了算。核对员是子代理，而子代理的"我跑过测试了"只是一种
+主张；结尾的 `world.run` 会真刀真枪地跑一遍测试文件，结果就落在它的退出码上。
+实现者的角色设定点名了它必须运行的确切命令，出于同样的原因——"跑一下测试"会让
+子代理挑最快变绿的办法。
 
-Two artifacts, each for a different moment. The metrics tile is for whoever is watching the
-loop: round and open counter-examples, fed by the `report` call the script was already
-making. The markdown report is for afterwards — the same facts as the return, in the long
-form the user keeps. The tests themselves are not published: they live in the repository,
-and a card for a file the user would open in the editor anyway says nothing new.
+两个产物，各对应一个时刻。指标瓦片是给盯着循环看的人的：轮数与未解决的反例数，
+由脚本本来就在调用的 `report` 喂数据。Markdown 报告是给事后看的——与返回值相同的
+事实，以用户会留存的长文形式呈现。测试文件本身不发布：它们就在仓库里，为一张
+用户反正要在编辑器里打开的文件做卡片，说不出任何新东西。
 
 ---
 
-## 2. Flaky test triage
+## 2. 不稳定（flaky）测试分诊
 
-Scan, then plan a fix under critique, then judge each finding independently. Three
-topologies in one script, each chosen for a different reason.
+先扫描，再在批评之下规划修复，然后独立裁决每一条发现。一个脚本里有三种拓扑，
+各自因不同理由而选中。
 
 <!-- compile -->
 ```ts
 interface Finding {
-  /** Test identifier as the runner reports it. */
+  /** 测试运行器所报告的测试标识符。 */
   testId: string;
-  /** Workspace-relative path of the test file. */
+  /** 测试文件的工作区相对路径。 */
   file: string;
-  /** What makes it flaky. */
+  /** 是什么让它不稳定。 */
   kind: "timing" | "ordering" | "external";
-  /** 0-1. How confident the scan is that this is really flaky. */
+  /** 0-1。扫描对"它确实不稳定"的把握。 */
   confidence: number;
 }
 interface Scan {
   findings: Finding[];
 }
 interface Plan {
-  /** One entry per test, in the order the fixes should be applied. */
+  /** 每个测试一条，按修复应施加的顺序排列。 */
   steps: { testId: string; change: string }[];
-  /** Anything the plan deliberately does not address. */
+  /** 计划刻意不去处理的部分。 */
   outOfScope: string[];
 }
 interface Review {
   approved: boolean;
-  /** What is wrong with the plan. Empty when approved. */
+  /** 计划哪里有问题。批准时为空。 */
   feedback: string;
 }
 interface Judgement {
-  /** False when the finding is a false positive. */
+  /** 发现为误报时为 false。 */
   real: boolean;
   reason: string;
 }
 interface Confirmation {
-  /** True only when you reproduced the flakiness yourself (re-ran the test, read the timing dependence). */
+  /** 仅当你亲自复现了不稳定（重跑过测试、读过时序依赖）时才为 true。 */
   reproduced: boolean;
-  /** What you did to check, one sentence. */
+  /** 你做了什么检查，一句话。 */
   note: string;
 }
 interface ReportedFinding extends Finding {
-  /** "verified" when the confirmer reproduced it; "unconfirmed" when it could not. */
+  /** 复核员复现成功时为 "verified"；无法复现时为 "unconfirmed"。 */
   status: "verified" | "unconfirmed";
 }
 interface FlakyReport {
-  /** Two or three sentences answering what the user asked for. */
+  /** 用两三句话回答用户所问。 */
   conclusion: string;
   findings: ReportedFinding[];
-  /** The approved plan, when the loop converged. */
+  /** 循环收敛时，已批准的计划。 */
   plan?: Plan;
   converged: boolean;
   rounds: number;
-  /** What the run checked and how. */
+  /** 本次运行检查了什么、怎么检查的。 */
   verified: string[];
-  /** What the run did not look at or could not check, and why. */
+  /** 本次运行没看什么、查不了什么，以及原因。 */
   notCovered: string[];
 }
 
-// Every candidate is a card; it moves column as the run makes up its mind about it.
+// 每个候选都是一张卡片；运行对它下判断时，卡片就在列间移动。
 artifact.board("candidates", {
   title: "Flaky test candidates",
   key: "testId",
@@ -248,17 +242,17 @@ if (scan.findings.length === 0) {
   return empty;
 }
 
-// Independent judges: one fresh context per finding, because a judge that has seen the
-// other findings starts grading on a curve instead of on the merits. Each carries the
-// test id in its name — one subagent per finding means one name per finding.
+// 独立评委：每条发现一个全新上下文，因为见过其他发现的评委
+// 会开始按曲线打分，而不是按事实本身。每位评委的名字里都带着
+// 测试 id——每条发现一个子代理，就意味着每条发现一个名字。
 //
-// A judge's verdict is a judgement, not a reproduction, so each survivor goes on to a fresh
-// confirmer that re-runs the test and reads the timing dependence itself; the ask forbids
-// edits. The confirmer is chained right after its own judge, inside the same callback: a
-// candidate is confirmed the moment its judge rules, not after every judge has. What the
-// confirmer cannot reproduce is kept and labelled, not dropped.
+// 评委的裁决是一种判断，而不是复现，所以每个幸存者接下来都会
+// 交给一位全新的复核员，由复核员自己重跑测试并阅读时序依赖；
+// ask 禁止任何编辑。复核员紧接在自己的评委之后、链在同一个回调内：
+// 一个候选在其评委裁定的那一刻就被确认，而不是等所有评委裁定完。
+// 复核员无法复现的内容会被保留并打上标签，而不是丢弃。
 phase("Judge each candidate and confirm the real ones as they are judged");
-// One join: the planner below needs every real finding before it can plan.
+// 一次汇合：下面的规划器需要所有真实发现才能开始规划。
 const outcomes = await Promise.all(
   scan.findings.map(async (finding): Promise<ReportedFinding | undefined> => {
     const judgement = await agent(`judge-${finding.testId}`).ask<Judgement>(
@@ -293,7 +287,7 @@ if (real.length === 0) {
   return empty;
 }
 
-// Planner and reviewer: created once, reused every round, so each accumulates context.
+// 规划器与评审员：只创建一次、每轮复用，从而各自累积上下文。
 const planner = agent("planner", "You write minimal, concrete fixes for flaky tests.");
 const reviewer = agent("reviewer", "You find the flaw in a fix plan. Approve only when you cannot find one. You never edit files.");
 
@@ -352,49 +346,46 @@ await artifact.markdown(
 return done;
 ```
 
-**Why it is written this way.** The judges are fresh per finding and the planner/reviewer pair
-is hoisted — opposite choices, both deliberate. Judging wants independence, so sharing a
-context would actively corrupt it; planning wants memory, so a fresh planner each round would
-waste it. The confirmers are a third kind: fresh and per finding, told not to edit, because a
-judge's verdict is an opinion about a description, and only re-running the test turns it into
-a fact. What they cannot reproduce stays in the report as `unconfirmed`. Each confirmer
-follows its own judge inside one callback, so the fan-out has one join instead of two:
-confirming candidate three never waits for candidate forty's judge.
+**为什么这样写。** 评委对每条发现都是新开的，而规划器/评审员这对被提升到循环外——
+相反的选择，都是刻意的。裁决需要独立性，共享上下文会主动污染它；规划需要记忆，
+每轮换一个新规划器只会浪费它。复核员是第三种：新开的、逐发现一份、被告知不许
+编辑，因为评委的裁决只是对一个描述的意见，只有重跑测试才能把它变成事实。复核
+不出来的东西会保留在报告里并标为 `unconfirmed`。每个复核员紧跟自己的评委、处在
+同一个回调内，于是扇出只有一次汇合而不是两次：确认第三个候选，永远不用等第四十个
+候选的评委。
 
-The two early returns matter. A scan that finds nothing and a judging pass that rejects
-everything are both *successes* with an empty result, not failures — and each avoids paying
-for a planning loop over an empty list. Both still return the full report shape, with a
-`conclusion` that says which of the two happened. Findings are reported before planning
-starts, so even a planning loop that never converges hands back the confirmed findings.
+两个提前返回都有讲究。一无所获的扫描与全盘否决的裁决，都是结果为空的*成功*，
+而非失败——而且都避免为一张空列表付出规划循环的代价。二者仍返回完整的报告形态，
+`conclusion` 会说明发生的是哪一种。发现在规划开始之前就已上报，所以哪怕规划循环
+永远不收敛，已确认的发现也会交回来。
 
-The board is the watcher's view of a fan-out: every candidate appears the moment the scan
-returns and moves column as a judge or a confirmer rules on it, because a later item with the
-same `testId` replaces the card. The report is published once, after the planning loop, which
-is why the loop `break`s to a single return instead of returning from inside. The two early
-returns publish nothing: "No flaky tests found" is a one-line answer, and a page that
-restates it would be noise.
+看板是扇出的观察者视图：扫描一返回，每个候选立刻出现，并在评委或复核员下判断时
+移动列，因为后面同 `testId` 的条目会替换掉那张卡片。报告在规划循环之后只发布
+一次，这也是循环用 `break` 走向单一 return、而不是从循环内部 return 的原因。两个
+提前返回什么都不发布："没发现不稳定测试"是一行字就能回答的事，再用一页去复述
+它就是噪音。
 
 ---
 
-## 3. Call-site migration
+## 3. 调用点迁移
 
-Discover, transform in parallel, then verify. The transforming subagents write files, so this is
-the one shape where isolation and verification really matter.
+先发现，再并行改写，然后验证。改写的子代理要写文件，所以这是唯一一个隔离与验证
+真正要紧的形态。
 
 <!-- compile -->
 ```ts
 interface Migration {
-  /** Whether this file needed changing at all. */
+  /** 这个文件是否本来就需要修改。 */
   changed: boolean;
-  /** What was rewritten, one line. */
+  /** 改写了什么，一行话。 */
   summary: string;
-  /** Anything the migrator could not do safely and left alone. */
+  /** 迁移器无法安全处理而放过的部分。 */
   skipped: string[];
 }
 interface Check {
-  /** True when the file compiles and its tests pass after the change. */
+  /** 修改之后，文件能编译且测试通过时为 true。 */
   clean: boolean;
-  /** What broke, when it did not. */
+  /** 不通过时，坏在哪。 */
   problem: string;
 }
 
@@ -417,8 +408,8 @@ const paths = [...new Set(hits.map((h) => h.path))];
 log(`${OLD_API} appears in ${paths.length} files (${hits.length} call sites)`);
 if (paths.length === 0) return { migrated: [], failed: [], note: "nothing to migrate" };
 
-// One persona, reused by every migrator subagent. Personas are values you can share; subagents
-// and their names are not — each file gets its own of both.
+// 一份角色设定，被所有迁移子代理复用。角色设定是可以共享的值；子代理
+// 及其名字不是——每个文件各得一份。
 const MIGRATOR = {
   system:
     `You migrate call sites from ${OLD_API} to the async ${NEW_API}, adding await and making ` +
@@ -426,10 +417,10 @@ const MIGRATOR = {
     "migrated safely, leave it and say why.",
 };
 
-// One migrator per file: the edits are disjoint, so they can run at once, and a fresh
-// context per file keeps one file's oddities from leaking into another's rewrite.
+// 每个文件一个迁移器：各文件的修改互不相交，因此可以同时进行，
+// 而每文件一个全新上下文，能让一个文件的怪癖不泄漏进另一个文件的重写。
 phase("Migrate each file and verify the result");
-// One join: the whole-tree suite below needs every file migrated first.
+// 一次汇合：下面的整套树级测试需要每个文件先迁移完。
 const results = await Promise.all(
   paths.map(async (path) => {
     try {
@@ -438,8 +429,8 @@ const results = await Promise.all(
       );
       if (!migration.changed) return { path, migration, check: undefined };
 
-      // Verify with a separate context: a subagent asked to check its own work grades
-      // generously. It compiles and runs tests; the ask forbids edits.
+      // 用独立上下文验证：让子代理检查自己的工作，它会打分从宽。
+      // 它编译并运行测试；ask 禁止它编辑。
       const check = await agent(`checker-${path}`).ask<Check>(
         `Does ${path} still compile and pass its tests after the ${NEW_API} migration? ` +
           `Run the checks; do not edit any file. The change was: ${migration.summary}`,
@@ -457,9 +448,9 @@ const results = await Promise.all(
 const migrated = results.filter((r) => r.check?.clean === true).map((r) => r.path);
 const failed = results.filter((r) => r.check?.clean === false || r.error !== undefined);
 
-// Every file passed its own check; now the tree as a whole, once. A per-file checker cannot
-// see the caller in another file that a migrated signature broke — the full suite can, and
-// it is the check the user will run themselves.
+// 每个文件都通过了自己的检查；现在轮到整棵树，只来一次。逐文件检查器
+// 看不到另一个文件里被迁移签名弄坏的调用方——完整测试套件看得到，
+// 而且这正是用户自己会跑的那次检查。
 phase("Run the whole test suite once over the migrated tree");
 const suite = await world.run("npm", ["test"], { timeoutMs: 1_800_000 });
 const suiteClean = suite.exitCode === 0;
@@ -495,54 +486,48 @@ return {
 };
 ```
 
-**Why it is written this way.** `files.grep` narrows before the fan-out: globbing `src/**/*.ts`
-and asking every file whether it uses the old API would spend a session per file to learn
-what one search already knew. Because `grep` rejects instead of truncating when it overruns
-its cap, the path list is either complete or absent — never quietly partial, which for a
-migration is the difference between finished and silently half-finished.
+**为什么这样写。** `files.grep` 在扇出之前先收窄：如果对 `src/**/*.ts` 做通配、再
+逐个文件问它用没用旧 API，等于每个文件花掉一个会话，只为弄清一次搜索早已知道的
+事。因为 `grep` 超出上限时是拒绝而不是截断，路径列表要么完整、要么没有——绝不会
+悄悄缺一角，而对迁移来说，这正是"做完了"与"悄悄做了一半"之间的差别。
 
-Both subagents in the fan-out are named per path. That is not decoration: a run rejects two
-subagents sharing a name, so `agent("migrator")` inside the `map` would not survive its second
-file — and the per-path names are also what a corrected re-run (`AmendWorkflow`) matches its
-imported cache against, so re-running this script after fixing one detail does not re-migrate
-the files that already came out clean.
+扇出中的两个子代理都按路径命名。这不是装饰：一次运行会拒绝两个同名的子代理，所以
+`map` 里的 `agent("migrator")` 活不过第二个文件——而且按路径命名的名字，也是修正
+后的重跑（`AmendWorkflow`）匹配其导入缓存所依据的键，因此修好一处细节后重跑本脚本，
+不会把已经干净的文件再迁移一遍。
 
-The checker is a **separate subagent** from the migrator, which is what makes the check
-meaningful: a subagent asked to grade its own migration grades generously. It builds and
-tests, and the ask is what forbids it to patch what it finds broken. The checker also runs
-inside the same callback as its migrator — a per-item pipeline with one join — so the first
-file is verified while the fortieth is still being rewritten, instead of every checker
-waiting behind a `Promise.all` for the slowest migration. The
-`try`/`catch` is per file, so one unmigratable file costs one file rather than the run. And
-the return value separates `migrated` from `failed` from `skipped`, because "we changed 40
-files" is not an outcome anyone can act on.
+检查器与迁移器是**各自独立的子代理**，这正是检查有意义的原因：让子代理给自己做的
+迁移打分，它会打得很宽。它负责构建和测试，而 ask 明令禁止它修补发现的问题。检查器
+还与自己的迁移器同处一个回调——一条逐条目的流水线、一次汇合——于是第一个文件在被
+验证时，第四十个可能还在重写，而不是所有检查器都排在 `Promise.all` 后面等最慢的
+那个迁移。`try`/`catch` 是逐文件的，于是一个迁不动的文件只损失一个文件，而不是
+整条运行。返回值把 `migrated`、`failed`、`skipped` 分开，因为"我们改了 40 个文件"
+不是任何人能据以行动的结论。
 
-The fan-out verifies each file; the `world.run` after it verifies the tree. Those are
-different checks: forty files that each pass their own tests can still not compile together,
-and the caller in a file nobody migrated is exactly what a per-file checker never opens. The
-whole-suite run is the check the user would run before merging, so it runs here, once, with
-the timeout a real suite needs — and when it fails, `conclusion` says the result is
-unverified rather than letting the forty green rows speak for the tree.
+扇出验证每个文件；其后的 `world.run` 验证整棵树。这是两种不同的检查：四十个各自
+测试通过的文件，合在一起仍可能编译不过，而某个没人迁移的文件里的调用方，恰恰是
+逐文件检查器永远不会打开的东西。整套测试的运行就是用户合并前会自己跑的那次检查，
+所以它在这里跑、只跑一次、带上真实测试所需的超时——一旦失败，`conclusion` 会明说
+结果未经验证，而不是让四十行绿色替整棵树代言。
 
-The table is the fan-out seen live: one row per file, keyed by path, filled in as each
-checker answers, with the skipped files landing in it too. The report at the end is the
-same list in prose for the user to keep. The migrated files themselves are not published —
-they are the repository, and the user reads them there. The early return for "nothing to
-migrate" publishes nothing: a one-line answer needs no page.
+表格是扇出的实时视图：每文件一行、以路径为键、随各检查器应答而填入，被跳过的文件
+也会落进表里。结尾的报告是同一份清单的文字版，供用户留存。迁移后的文件本身不
+发布——它们就是仓库，用户在仓库里读它们。"无可迁移"的提前返回什么都不发布：
+一行字的回答不需要一页纸。
 
 ---
 
-## 4. Prover loop gated by the real checker
+## 4. 由真实检查器把关的证明循环
 
-One subagent doing open-ended repair, and a gate that cannot be talked past: `world.run`
-executes the actual proof checker, and the loop advances on its exit code, not on anyone's
-claim. Compare example 1, where the skeptic is another subagent — right when breaking the work
-takes creativity. When a command can render the verdict, the command should.
+一个子代理做开放式修复，外加一扇无法用言语糊弄过去的门禁：`world.run` 执行真正的
+证明检查器，循环凭它的退出码推进，而不凭任何人的主张。对比示例 1——那里的怀疑者
+是另一个子代理，那在击破工作需要创造力时才合适。当一条命令能给出裁决时，就该让
+命令来给。
 
 <!-- compile -->
 ```ts
 interface FixNotes {
-  /** What changed this round, one line. */
+  /** 本轮改了什么，一行话。 */
   summary: string;
 }
 
@@ -565,8 +550,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   rounds = round;
   attempts.push(notes.summary);
   phase("Check the file with the fast checker");
-  // The fast tier: one file, seconds. It exits 0 on a proof that still says `sorry` and
-  // only warns on stderr, so the exit code alone is not the verdict.
+  // 快速档：单文件，几秒钟。对一个仍写着 `sorry` 的证明它也会退出 0，
+  // 只在 stderr 上告警，所以单凭退出码并不是裁决。
   const check = await world.run("lake", ["env", "lean", TARGET], { timeoutMs: 600_000 });
   clean = check.exitCode === 0 && !check.stderr.includes("sorry");
   if (clean) {
@@ -582,8 +567,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   );
 }
 
-// The strong tier, once: the whole project builds with the new proof in it. That is what
-// the request was about, and it runs even though the fast tier already said yes.
+// 强档，只跑一次：整个项目带上新证明一起构建。这才是请求关心的事，
+// 即便快速档已经说了通过，它也要跑。
 let proved = false;
 if (clean) {
   phase("Build the whole project with the new proof");
@@ -632,85 +617,78 @@ return proved
       };
 ```
 
-**Why it is written this way.** The prover is created once and keeps its context, so round
-seven remembers what rounds one through six already tried. The checker is not a subagent at
-all: `world.run` runs the real command, a nonzero exit comes back as a **value**, and the
-loop's normal case is reading `exitCode` and handing `stderr` to the prover as the next
-round's instructions — no `catch` anywhere, because rejections are reserved for the world
-failing to answer (spawn failure, timeout, over-cap output).
+**为什么这样写。** 证明者只创建一次并保留上下文，于是第七轮还记得前六轮试过什么。
+检查器根本不是子代理：`world.run` 跑真正的命令，非零退出以**值**的形式返回，循环的
+常态就是读 `exitCode`、把 `stderr` 作为下一轮的指令交给证明者——全程没有 `catch`，
+因为拒绝（rejection）只留给世界本身不应答的情形（spawn 失败、超时、输出超限）。
 
-There are two checks, and they are not interchangeable. `lake env lean` on one file is the
-fast tier: it drives the rounds because it answers in seconds, and it reads stderr as well
-as the exit code because a proof that still says `sorry` exits 0 with a warning. `lake
-build` over the whole project is the strong tier — the check the request is really about —
-and it runs once at the end whether or not the fast tier already passed. A loop gated on
-the fast tier alone would return "proved" for a file that still contains `sorry`, and never
-learn that the new proof breaks a module that imports it. Which two commands play these
-roles is a fact about the repository, read from its README or build files before the script
-is written, not a habit carried in from the last project.
+这两次检查不可互换。对单文件的 `lake env lean` 是快速档：它驱动各轮，因为几秒内
+就有答案；它同时读 stderr 和退出码，因为一个仍写着 `sorry` 的证明会以 0 退出并
+附带告警。覆盖整个项目的 `lake build` 是强档——真正与请求相关的检查——无论快速档
+是否已通过，它在结尾都要跑一次。一个只由快速档把关的循环，会对一个仍含 `sorry`
+的文件返回"已证明"，并且永远不会得知新证明弄坏了某个导入它的模块。由哪两条命令
+扮演这两个角色，是仓库自身的事实，要在写脚本之前从它的 README 或构建文件里读
+出来，而不是从上一个项目带来的习惯。
 
-The command name is a literal and the varying part — the target path — rides in the args
-array; that is the rule, and it is also what the user sees and approves at confirmation.
-The long `timeoutMs` is deliberate: proof checking is allowed to be slow, and the per-call
-override exists precisely for real build-sized checks. Every round is reported as it lands,
-so a run that dies on round eight still shows seven rounds of attempts. Before wiring a
-different checker command, test what its stderr actually looks like with a one-line
-`EvalWorkflowSnippet` call — the parse you write against a guess is the parse that breaks.
+命令名是字面量，变化的部分——目标路径——放在 args 数组里；这是规则，也是用户在
+确认时看到并批准的东西。长 `timeoutMs` 是刻意的：证明检查被允许很慢，逐调用覆盖
+正是为真实构建量级的检查而存在的。每一轮在落定时就被上报，所以死在第八轮的运行
+仍会留下七轮尝试。在接上另一个检查器命令之前，先用一次一行的 `EvalWorkflowSnippet`
+调用看看它的 stderr 到底长什么样——你照着猜测写出的解析，就是那个会坏掉的解析。
 
-One artifact, deliberately. The report lists every attempt, which is more than the
-`conclusion` can say, so it earns its page. There is no dashboard: the only state a watcher
-could follow is the round number and whether the checker passed, and the phase timeline
-lighting up "Repair what the checker rejected" again already shows exactly that. A metrics
-tile would repeat it, and the proof file is the repository's to show, not a card's.
+只有一个产物，是刻意的。报告列出每一次尝试，比 `conclusion` 说得更多，所以它配得
+上那一页。没有仪表盘：观察者能跟随的唯一状态就是轮数与检查器是否通过，而阶段
+时间线再次点亮"修复检查器拒绝之处"时，已经把这件事展示得分毫不差。指标瓦片只会
+重复它，证明文件归仓库展示，不归卡片。
 
-## 5. Changed-file review with confirmation as reviews land
+## 5. 变更文件评审：随评审落地即时确认
 
-Review every changed file, triage its findings on one scale, confirm each kept finding
-independently, and hand back a report. Everything a file needs happens as soon as its own
-review lands; the only join is the cross-file deduplication that needs every finding.
+评审每个变更文件，在同一把尺子上对发现做分诊，独立确认每条保留下来的发现，最后
+交回一份报告。一个文件需要的一切，在它自己的评审落地时就发生；唯一的汇合是需要
+全部发现的跨文件去重。
 
 <!-- compile -->
 ```ts
 interface Finding {
-  /** Workspace-relative path, with a line when it applies: "src/a.ts:42". */
+  /** 工作区相对路径，适用时带上行号："src/a.ts:42"。 */
   where: string;
-  /** One sentence: what is wrong. */
+  /** 一句话：哪里不对。 */
   what: string;
-  /** What showed it: the lines read, or the command and the output that proved it. */
+  /** 证明它的东西：读过的行，或命令与证明它的输出。 */
   evidence: string;
-  /** How much it matters. Reserve "high" for data loss, a crash, or a wrong result. */
+  /** 有多重要。"high" 只留给数据丢失、崩溃或错误结果。 */
   severity: "low" | "medium" | "high";
 }
 interface Review {
   findings: Finding[];
 }
 interface Keep {
-  /** True when this finding is worth putting in front of a human. */
+  /** 这条发现值得摆到人类面前时为 true。 */
   keep: boolean;
 }
 interface Confirmation {
-  /** True only when you reproduced the problem yourself from the evidence. */
+  /** 仅当你依据证据亲自复现了问题时才为 true。 */
   reproduced: boolean;
-  /** What you did to check, one sentence. */
+  /** 你做了什么检查，一句话。 */
   note: string;
 }
 interface ReportedFinding extends Finding {
-  /** "verified" when the confirmer reproduced it; "unconfirmed" when it could not. */
+  /** 复核员复现成功时为 "verified"；无法复现时为 "unconfirmed"。 */
   status: "verified" | "unconfirmed";
 }
 interface Digest {
-  /** The confirmed findings with duplicates across files merged, one line each. */
+  /** 已确认的发现，跨文件去重已合并，每条一行。 */
   lines: string[];
-  /** Two or three sentences a reader can act on. */
+  /** 两三句话，读者可据以行动。 */
   summary: string;
 }
 interface WorkflowReport {
-  /** Two or three sentences answering what the user asked for. */
+  /** 用两三句话回答用户所问。 */
   conclusion: string;
   findings: ReportedFinding[];
-  /** What the run checked and how. */
+  /** 本次运行检查了什么、怎么检查的。 */
   verified: string[];
-  /** What the run did not look at or could not check, and why. */
+  /** 本次运行没看什么、查不了什么，以及原因。 */
   notCovered: string[];
 }
 
@@ -723,15 +701,15 @@ try {
 }
 log(`reviewing ${paths.length} changed files`);
 
-// One triage subagent for all findings: severity only means anything if it is judged on a
-// consistent scale. It is a queue, not a barrier — asks on it run FIFO, so a finding reaches
-// it the moment its file's review lands, whichever file that is.
+// 所有发现共用一个分诊子代理：严重度只有在一把一致的尺子上评判才有意义。
+// 它是一个队列，不是屏障——发向它的 ask 按 FIFO 执行，所以一条发现
+// 在其所属文件的评审落地的那一刻就到达这里，无论那是哪个文件。
 const triage = agent("triage", "You decide which review findings deserve a human's attention. Be strict.");
 
-// One reviewer per file, fresh each: the files are unrelated, so nothing is gained by
-// sharing a context and everything is gained by running them at once. Triage and
-// confirmation live inside the same callback, so no file waits for the slowest review
-// before its findings move on; the outer `Promise.all` is the only join the report waits on.
+// 每个文件一个评审员，各自全新：文件之间互不相关，共享上下文毫无收益，
+// 而同时运行收益全拿。分诊与确认都活在同一个回调内，所以任何文件
+// 都不必等最慢的那份评审结束才让自己的发现继续前进；外层的 `Promise.all`
+// 是报告唯一等待的汇合。
 const perFile = await Promise.all(
   paths.map(async (p) => {
     const review = await agent(`reviewer-${p}`).ask<Review>(`Review ${p} for correctness bugs.`);
@@ -742,9 +720,9 @@ const perFile = await Promise.all(
       if (verdict.keep) kept.push(finding);
     }
 
-    // A separate confirmer per kept finding, blind to the reviewer that raised it: it reads
-    // the code, runs a check if one decides it, and is told not to fix anything. The name
-    // carries the path and the index, because every subagent name in a run must be unique.
+    // 每条保留的发现配一个独立复核员，对提出它的评审员全然不知情：它读
+    // 代码，如果有现成检查就跑一次，并被叮嘱什么都不许修。名字里带上
+    // 路径和序号，因为一次运行中的每个子代理名字都必须唯一。
     return Promise.all(
       kept.map(async (finding, index) => {
         const check = await agent(`confirmer-${p}-${index}`).ask<Confirmation>(
@@ -754,7 +732,7 @@ const perFile = await Promise.all(
           ...finding,
           status: check.reproduced ? "verified" : "unconfirmed",
         };
-        report(reported); // published now, with its status, so it survives a later failure
+        report(reported); // 立即发布，连同状态，这样它能在之后的失败中幸存
         return reported;
       }),
     );
@@ -763,8 +741,8 @@ const perFile = await Promise.all(
 const confirmed = perFile.flat();
 log(`${confirmed.length} findings confirmed or labelled`);
 
-// The one stage that genuinely needs every finding: two reviewers can flag the same root
-// cause from two files, and only a reader of the whole list can merge them.
+// 真正需要全部发现的唯一一个阶段：两个评审员可能从两个文件里
+// 标记出同一个根因，只有读过整份清单的人才能把它们合并。
 phase("Merge duplicate findings across files and write them up");
 const digest = await agent("editor", "You merge review findings that share a root cause and write them up for the engineer who fixes them.")
   .ask<Digest>(`Merge duplicates and write these up:\n${JSON.stringify(confirmed)}`);
@@ -793,75 +771,71 @@ const result: WorkflowReport = {
 return result;
 ```
 
-Three shapes in one script, each chosen for a reason. The reviewers are fresh and parallel
-because the files are unrelated. The triage subagent is shared because severity must mean the
-same thing twice — and sharing costs nothing here, because its FIFO queue is fed as reviews
-land rather than after all of them. The confirmers are fresh, per finding and blind to the
-reviewer, and they start the moment their file's triage is done: with twelve files and one
-slow reviewer, eleven files' findings are confirmed and reported while it is still reading.
-Nothing gets a second reader on top: each finding was confirmed, and the editor's job is
-merging and writing up, not re-checking.
+一个脚本里有三种形态，各有其理由。评审员是新开的且并行，因为文件彼此无关。分诊
+子代理是共享的，因为严重度必须两次都意味着同一件事——而在这里共享毫无代价，因为
+它的 FIFO 队列是随评审落地而被投喂的，而不是等所有评审结束。复核员是新开的、逐
+发现一份、对评审员全然不知情，并且在自己文件的分诊一完成就开工：十二个文件配一个
+慢评审员时，其余十一个文件的发现已在它还在阅读时被确认并上报。没有任何发现再叠
+一层第二读者：每条发现都已被确认，而编辑的职责是合并与成文，不是复查。
 
-## 6. Fact-finding pipeline with a fresh verifier per fact
+## 6. 事实核查流水线：每条事实一个新核对员
 
-Research a topic from five angles at once, check every fact as it arrives with a verifier
-that did not do the research, then write the report from the facts that held. The hand-off
-from research to verification is a channel, so the first verifier starts while four
-researchers are still reading; the writer sits after the one join, because it needs every
-verified fact.
+同时从五个角度研究一个主题，每条事实一到达就交给一个没有做过研究的核对员去查，
+然后从站得住的事实写出报告。研究到核查的交接是一条通道，于是第一个核对员开工时
+四位研究者还在阅读；写手坐在唯一一次汇合之后，因为它需要全部经核实的事实。
 
 <!-- compile -->
 ```ts
 interface Fact {
-  /** Stable id built from the angle and a sequence number: "tests-3". */
+  /** 由角度加序号构成的稳定 id："tests-3"。 */
   id: string;
-  /** One sentence that can be checked against the repository. */
+  /** 一句可以对照仓库检验的话。 */
   claim: string;
-  /** Where the researcher saw it: a path with a line, or a command and its output. */
+  /** 研究者在哪里看到的它：带行号的路径，或命令及其输出。 */
   source: string;
-  /** The research angle it came from. */
+  /** 它来自哪个研究角度。 */
   angle: string;
 }
 interface Research {
   facts: { claim: string; source: string }[];
 }
 interface Verdict {
-  /** True only when you confirmed the claim yourself from the source given. */
+  /** 仅当你依据给定的来源亲自确认了该主张时才为 true。 */
   holds: boolean;
-  /** What you did to check, one sentence. */
+  /** 你做了什么检查，一句话。 */
   note: string;
 }
 interface Finding {
-  /** Where the fact lives: the source the verifier confirmed. */
+  /** 事实在何处：核对员确认过的来源。 */
   where: string;
-  /** The fact, one sentence. */
+  /** 事实本身，一句话。 */
   what: string;
-  /** How the verifier confirmed it. */
+  /** 核对员如何确认的。 */
   evidence: string;
-  /** Every finding here was confirmed by a verifier that did not do the research. */
+  /** 这里的每条发现都由一个没有做过研究的核对员确认过。 */
   status: "verified";
 }
 interface Draft {
-  /** The report in markdown, for the user. */
+  /** 报告正文，Markdown，给用户。 */
   markdown: string;
-  /** Two or three sentences a reader can act on. */
+  /** 两三句话，读者可据以行动。 */
   summary: string;
 }
 interface WorkflowReport {
-  /** Two or three sentences answering what the user asked for. */
+  /** 用两三句话回答用户所问。 */
   conclusion: string;
   findings: Finding[];
-  /** What the run checked and how. */
+  /** 本次运行检查了什么、怎么检查的。 */
   verified: string[];
-  /** What the run did not look at or could not check, and why. */
+  /** 本次运行没看什么、查不了什么，以及原因。 */
   notCovered: string[];
 }
 
 const topic = String(args.topic ?? "this repository");
 const angles = ["architecture", "data flow", "error handling", "tests", "history"];
 
-// The hand-off between research and verification: a researcher that is still reading keeps
-// sending while verifiers already work on what has landed. The research stage owns the close.
+// 研究与核查之间的交接：还在阅读的研究者继续发送，而核对员已经在
+// 处理已到达的内容。研究阶段负责关闭。
 const facts = channel<Fact>("facts");
 const passed: Finding[] = [];
 const rejected: string[] = [];
@@ -882,14 +856,14 @@ const research = future(async () => {
       }),
     );
   } finally {
-    facts.close(); // a failed researcher still ends the stream for the verifiers
+    facts.close(); // 失败的研究者也会为核对员结束这条数据流
   }
 });
 
 const verify = future(async () => {
   phase("Check each fact as it arrives");
-  // A fresh verifier per fact, named after it: cache identity stays per fact on a revised
-  // run, and the name says which fact each card is about.
+  // 每条事实一个全新核对员，以它命名：修订后的运行中，缓存身份按事实保留，
+  // 而名字说明了每张卡片讲的是哪条事实。
   const checks: Promise<void>[] = [];
   for await (const fact of facts) {
     checks.push(
@@ -901,21 +875,21 @@ const verify = future(async () => {
         if (verdict.holds) {
           const finding: Finding = { where: fact.source, what: fact.claim, evidence: verdict.note, status: "verified" };
           passed.push(finding);
-          report(finding); // published now, so it survives a later failure
+          report(finding); // 立即发布，这样它能在之后的失败中幸存
         } else {
           rejected.push(`${fact.claim} (${verdict.note})`);
         }
       }),
     );
   }
-  // The join is what tells this stage it is done: without it the stage ends when the channel
-  // closes, with checks still running and half the results missing.
+  // 汇合才是告诉这个阶段"你完成了"的东西：没有它，阶段会在通道关闭时
+  // 就结束，此时检查还在跑、一半的结果还没回来。
   await Promise.all(checks);
 });
 
-// Start both, then join once. No await in between: while the script awaits one stage, a
-// failure in the other has no listener and surfaces as an unhandled rejection instead of
-// failing the run with its error.
+// 先启动两者，再汇合一次。中间没有 await：当脚本在等待其中一个阶段时，
+// 另一个阶段里的失败没有监听者，会以未处理拒绝（unhandled rejection）的
+// 形式浮出水面，而不是带着错误让运行失败。
 await Promise.all([research, verify]);
 log(`${passed.length} facts verified, ${rejected.length} did not hold`);
 
@@ -935,33 +909,31 @@ const result: WorkflowReport = {
 return result;
 ```
 
-Two stages as futures, one channel, one join. Each future opens with its own phase marker,
-and stamping is lexical, so the two stages that run at the same time keep their own steps on
-the timeline. The research stage owns `facts.close()` in a `finally`: a researcher that fails
-still ends the stream, so the verifiers finish instead of parking on a channel nobody will
-send to. The verifiers are fresh and named per fact rather than pooled, because the facts are
-independent and a revised run should miss the cache for one changed fact, not for the whole
-pool. The `checks` array is the part people forget: the verify stage is done when its
-verifiers are, not when the channel closes, and the deadlock detector cannot catch a stage that
-returns early with work still in flight.
+两个阶段以并发阶段（future）呈现，一条通道，一次汇合。每个 future 以自己的阶段
+标记开场，而标记按词法归属，所以同时运行的两个阶段在时间线上各留各的步骤。研究
+阶段把 `facts.close()` 放在 `finally` 里：失败的研究者同样会结束数据流，于是核对
+员能收工，而不是停在一条再也没人发送的通道上。核对员是按事实新开并命名的，而不是
+池化复用，因为事实彼此独立，且修订后的运行应当只对那一条变了的事实失去缓存，而不
+是对整个池。`checks` 数组是最容易被忘掉的部分：核查阶段在它的核对员都完成时才算
+完成，而不是在通道关闭时；而死锁检测器抓不住一个带着仍在飞行的工作提前返回的阶段。
 
 ---
 
-## 7. Repository guide grown step by step through tail holes
+## 7. 通过尾部洞一步步长出的仓库导览
 
-The task — "write a guide to this repository" — has no workflow until the repository has
-been looked at. So the script does the one thing it can plan, the survey, and ends in a tail
-hole. Two fills later the run has six chapter writers, an independent reader, a reviser and a
-published guide, none of which the seed script named. (`SKILL.md` §15.)
+"给这个仓库写一篇导览"这个任务，在仓库被实际看过之前根本没有工作流可言。所以
+脚本只做它能规划的那一件事——勘察——然后停在一个尾部洞里。两次填充之后，这次
+运行有了六个章节写手、一名独立读者、一名修订者和一篇已发布的导览，而种子脚本
+没有点名其中任何一个。（`SKILL.md` §15。）
 
-The seed script, submitted with `CreateWorkflow`:
+种子脚本，随 `CreateWorkflow` 一起提交：
 
 <!-- compile -->
 ```ts
 interface Dir {
-  /** Workspace-relative path of a top-level entry. */
+  /** 顶层条目的工作区相对路径。 */
   path: string;
-  /** One sentence: what it is for. */
+  /** 一句话：它是干什么用的。 */
   purpose: string;
 }
 interface Survey {
@@ -969,9 +941,9 @@ interface Survey {
 }
 interface Chapter {
   title: string;
-  /** Paths the chapter actually covers. */
+  /** 章节实际覆盖的路径。 */
   covers: string[];
-  /** Body, Markdown, for a first-time reader. */
+  /** 正文，Markdown，写给首次阅读的读者。 */
   body: string;
 }
 interface Guide {
@@ -991,13 +963,12 @@ return await hole<Guide>(
 );
 ```
 
-The run reaches the hole and the notification carries the survey in the prompt. The first
-fill (the statements only, sent as `script`) decides the chapters, fans out a writer per
-directory and leaves the next hole:
+运行抵达洞口，通知把勘察结果带在提示里。第一次填充（只含语句，作为 `script`
+发送）决定章节划分，按目录扇出写手，并留下下一个洞：
 
 ```ts
 phase("分章并行撰写初稿");
-// The critic in the next step reads every chapter at once, so this join waits for all.
+// 下一步的批评者要一次读完所有章，所以这次汇合要等全部完成。
 const drafts = await Promise.all(
   survey.dirs.map((d) =>
     agent(`写手·${d.path}`, "你只写自己打开核实过的内容。").ask<Chapter>(
@@ -1012,8 +983,8 @@ return await hole<Guide>(
 );
 ```
 
-The second fill reads `drafts` from the enclosing scope, adds an independent read and a
-revision, publishes the guide and returns it, which closes the chain:
+第二次填充从外围作用域读到 `drafts`，加上一轮独立审读和一次修订，发布导览并
+返回它，链条就此闭合：
 
 ```ts
 phase("独立审读初稿");
@@ -1033,15 +1004,15 @@ await artifact.markdown("guide", chapters.map((c) => `## ${c.title}\n\n${c.body}
 return guide;
 ```
 
-After both fills the run's draft holds the effective script — the seed with each body spliced
-in as the last argument of its hole — which is what a resume replays and an amend revises:
+两次填充之后，运行的草稿里保存着生效脚本——种子脚本、每个洞的最后一位参数处拼接
+进各自的函数体——恢复（resume）重放的就是它，修订（amend）改的也是它：
 
 <!-- compile -->
 ```ts
 interface Dir {
-  /** Workspace-relative path of a top-level entry. */
+  /** 顶层条目的工作区相对路径。 */
   path: string;
-  /** One sentence: what it is for. */
+  /** 一句话：它是干什么用的。 */
   purpose: string;
 }
 interface Survey {
@@ -1049,9 +1020,9 @@ interface Survey {
 }
 interface Chapter {
   title: string;
-  /** Paths the chapter actually covers. */
+  /** 章节实际覆盖的路径。 */
   covers: string[];
-  /** Body, Markdown, for a first-time reader. */
+  /** 正文，Markdown，写给首次阅读的读者。 */
   body: string;
 }
 interface Guide {
@@ -1069,7 +1040,7 @@ return await hole<Guide>(
   "第1步：决定导览结构",
   `盘点：\n${survey.dirs.map((d) => `- ${d.path}：${d.purpose}`).join("\n")}`, async () => {
   phase("分章并行撰写初稿");
-  // The critic in the next step reads every chapter at once, so this join waits for all.
+  // 下一步的批评者要一次读完所有章，所以这次汇合要等全部完成。
   const drafts = await Promise.all(
     survey.dirs.map((d) =>
       agent(`写手·${d.path}`, "你只写自己打开核实过的内容。").ask<Chapter>(
@@ -1102,9 +1073,7 @@ return await hole<Guide>(
 );
 ```
 
-What to notice: each step's hole has its own name, because a hole is a phase and two holes
-with one name would be one phase; the prompts carry only what the next author needs, since
-the bindings carry the data; and the chain closed at step two because the author decided it
-was done, not because anything ran out. The writers are named per directory inside the
-`map`, so a revised run that changes one directory's chapter misses the cache for that one
-writer only.
+值得注意的几点：每一步的洞都有自己的名字，因为洞就是一个阶段，两个同名的洞会并成
+一个阶段；提示只带下一位作者需要的东西，因为数据由绑定携带；链条在第二步闭合，
+是因为作者判断已经完成，而不是因为什么被用尽了。写手在 `map` 内按目录命名，因此
+修订后的运行若只改了一个目录的章节，只有那一位写手失去缓存。
